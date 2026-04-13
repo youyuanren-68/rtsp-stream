@@ -11,7 +11,6 @@ import javax.servlet.*;
 import javax.servlet.http.HttpServletRequest;
 import java.io.IOException;
 
-@Component
 public class StreamAccessFilter implements Filter {
     
     private static final Logger log = LoggerFactory.getLogger(StreamAccessFilter.class);
