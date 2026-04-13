@@ -307,7 +307,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             "-c:a", audioCodec,
             "-ar", String.valueOf(audioSampleRate),
             "-f", "flv",
-            "-flvflags", "no_duration_filesize",
+            "-flvflags", "no_duration_filesize,no_sequence_end",
             flvOutput
         );
         
@@ -811,6 +811,8 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
     }
     
     private void restartFlvStream(String streamId) {
+        String rtspUrl = streamRtspUrls.get(streamId);
+        
         Process process = activeProcesses.get(streamId);
         if (process != null && process.isAlive()) {
             process.destroy();
@@ -822,6 +824,9 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                 Thread.currentThread().interrupt();
             }
         }
+        
+        activeProcesses.remove(streamId);
+        flvFileReady.put(streamId, false);
         
         String streamDir = flvOutputPath + "/" + streamId;
         String oldFlvPath = streamDir + "/live.flv";
@@ -835,18 +840,23 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             }
         }
         
-        flvFileReady.put(streamId, false);
-        
-        String rtspUrl = "";
-        for (Map.Entry<String, String> entry : streamStatus.entrySet()) {
-            if (entry.getKey().equals(streamId)) {
-                break;
+        if (rtspUrl != null && !rtspUrl.isEmpty()) {
+            log.info("[FFmpeg-{}] 正在重启FLV流...", streamId);
+            try {
+                Thread.sleep(1000);
+                boolean success = startFlvStream(rtspUrl, streamId);
+                if (success) {
+                    log.info("[FFmpeg-{}] FLV流重启成功", streamId);
+                } else {
+                    log.error("[FFmpeg-{}] FLV流重启失败", streamId);
+                }
+            } catch (Exception e) {
+                log.error("[FFmpeg-{}] FLV流重启异常: {}", streamId, e.getMessage(), e);
             }
+        } else {
+            log.error("[FFmpeg-{}] 无法获取RTSP地址，FLV流重启失败", streamId);
+            streamStatus.put(streamId, "stopped: file size limit, restart failed");
         }
-        
-        log.info("[FFmpeg-{}] FLV流已停止（文件大小限制），请重新启动", streamId);
-        streamStatus.put(streamId, "stopped: file size limit");
-        activeProcesses.remove(streamId);
     }
     
     @PreDestroy

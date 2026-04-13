@@ -80,7 +80,7 @@
         
         <div class="controls">
             <input type="text" id="rtspUrl" placeholder="RTSP地址 (rtsp://...)" value="rtsp://rtspstream:qrDIMnuNzPL2cwHIg0HRA@zephyr.rtsp.stream/movie">
-            <input type="text" id="streamId" placeholder="流标识 (可选)" value="camera01">
+            <input type="text" id="streamId" placeholder="流标识 (可选)" value="camera02">
             <button onclick="startStream()">启动流</button>
             <button class="stop" onclick="stopStream()">停止流</button>
         </div>
@@ -219,11 +219,15 @@
                     isLive: true,
                     url: 'http://' + window.location.host + flvUrl,
                     enableWorker: true,
-                    enableStashBuffer: false,
-                    stashInitialSize: 128,
+                    enableStashBuffer: true,
+                    stashInitialSize: 256,
                     autoCleanupSourceBuffer: true,
-                    autoCleanupMaxBackwardDuration: 30,
-                    autoCleanupMinBackwardDuration: 10
+                    autoCleanupMaxBackwardDuration: 60,
+                    autoCleanupMinBackwardDuration: 30,
+                    liveBufferLatencyAction: 'jump',
+                    liveSyncDurationCount: 3,
+                    lazyLoad: false,
+                    lazyLoadMaxDuration: 120
                 });
                 
                 player.attachMediaElement(videoElement);
@@ -236,10 +240,45 @@
                 
                 updateStatus('正在播放 FLV 流');
                 
+                let reconnectAttempts = 0;
+                const maxReconnectAttempts = 10;
+                
                 player.on(flvjs.Events.ERROR, (errorType, errorDetail, errorInfo) => {
                     console.error('播放器错误:', errorType, errorDetail, errorInfo);
-                    updateStatus('播放出错，3秒后自动重连...', 'error');
-                    setTimeout(() => reconnectPlayer(flvUrl), 3000);
+                    
+                    if (errorType === flvjs.ErrorTypes.MEDIA_ERROR) {
+                        updateStatus('媒体错误，尝试恢复...', 'error');
+                        
+                        if (reconnectAttempts < maxReconnectAttempts) {
+                            reconnectAttempts++;
+                            const delay = Math.min(1000 * reconnectAttempts, 5000);
+                            updateStatus(`播放出错，${delay/1000}秒后自动重连(第${reconnectAttempts}次)...`, 'error');
+                            setTimeout(() => {
+                                if (player) {
+                                    try {
+                                        player.unload();
+                                        player.detachMediaElement();
+                                        player.attachMediaElement(videoElement);
+                                        player.load();
+                                        player.play().catch(e => console.log('播放被阻止:', e));
+                                        updateStatus('已恢复播放');
+                                        reconnectAttempts = 0;
+                                    } catch (e) {
+                                        console.error('恢复播放失败，尝试完全重连:', e);
+                                        reconnectPlayer(flvUrl);
+                                    }
+                                }
+                            }, delay);
+                        } else {
+                            updateStatus('重连次数过多，请检查流状态', 'error');
+                        }
+                    } else if (errorType === flvjs.ErrorTypes.NETWORK_ERROR) {
+                        updateStatus('网络错误，尝试重连...', 'error');
+                        setTimeout(() => reconnectPlayer(flvUrl), 3000);
+                    } else {
+                        updateStatus('播放出错，3秒后自动重连...', 'error');
+                        setTimeout(() => reconnectPlayer(flvUrl), 3000);
+                    }
                 });
                 
                 player.on(flvjs.Events.MEDIA_INFO, (mediaInfo) => {

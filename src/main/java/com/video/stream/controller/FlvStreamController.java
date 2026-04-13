@@ -57,41 +57,66 @@ public class FlvStreamController {
             try {
                 raf = new RandomAccessFile(flvFile, "r");
                 byte[] buffer = new byte[8192];
-                long lastPosition = 0;
                 int noDataCount = 0;
-                int maxNoDataCount = 600;
+                int maxNoDataCount = 1800;
+                long lastAccessUpdate = System.currentTimeMillis();
+                long lastFileSize = 0;
+                int stableCount = 0;
                 
                 while (noDataCount < maxNoDataCount) {
                     long fileLength = raf.length();
                     long currentPosition = raf.getFilePointer();
                     
                     if (currentPosition >= fileLength) {
+                        if (fileLength == lastFileSize) {
+                            stableCount++;
+                            if (stableCount > 50) {
+                                log.warn("[FLV-{}] FFmpeg可能已停止写入，文件大小: {}", streamId, fileLength);
+                            }
+                        } else {
+                            stableCount = 0;
+                            lastFileSize = fileLength;
+                        }
+                        
                         noDataCount++;
+                        if (noDataCount % 100 == 0) {
+                            log.debug("[FLV-{}] 等待新数据: position={}, fileLength={}", streamId, currentPosition, fileLength);
+                        }
                         Thread.sleep(100);
                         continue;
                     }
                     
+                    stableCount = 0;
                     int bytesRead = raf.read(buffer);
                     if (bytesRead > 0) {
                         outputStream.write(buffer, 0, bytesRead);
                         outputStream.flush();
                         noDataCount = 0;
-                        lastPosition = raf.getFilePointer();
+                        
+                        long now = System.currentTimeMillis();
+                        if (now - lastAccessUpdate > 60000) {
+                            if (streamService != null) {
+                                streamService.recordStreamAccess(streamId);
+                            }
+                            lastAccessUpdate = now;
+                        }
                     } else {
                         noDataCount++;
                         Thread.sleep(50);
                     }
                 }
                 
-                log.info("FLV流传输结束: streamId={}, finalPosition={}", streamId, raf.getFilePointer());
+                log.warn("[FLV-{}] 超时退出: 超过{}秒无新数据", streamId, (maxNoDataCount * 100) / 1000);
                 
             } catch (IOException e) {
-                if (!e.getMessage().contains("Broken pipe") && !e.getMessage().contains("Connection reset")) {
-                    log.error("FLV流传输IO异常: streamId={}", streamId, e);
+                if (e.getMessage() != null && (e.getMessage().contains("Broken pipe") || e.getMessage().contains("Connection reset"))) {
+                    log.debug("[FLV-{}] 客户端断开连接", streamId);
+                } else {
+                    log.error("[FLV-{}] 流传输IO异常", streamId, e);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                log.debug("FLV流传输被中断: streamId={}", streamId);
+                log.debug("[FLV-{}] 流传输被中断", streamId);
             } finally {
                 if (raf != null) {
                     try {

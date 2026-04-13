@@ -3,9 +3,6 @@ package com.video.stream.filter;
 import com.video.stream.service.impl.RtspStreamServiceImpl;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
 
 import javax.servlet.*;
 import javax.servlet.http.HttpServletRequest;
@@ -15,14 +12,15 @@ public class StreamAccessFilter implements Filter {
     
     private static final Logger log = LoggerFactory.getLogger(StreamAccessFilter.class);
     
-    @Value("${rtsp.hls.access-path:/rtspStream/hls}")
-    private String hlsAccessPath;
+    private final String hlsAccessPath;
+    private final String flvAccessPath;
+    private final RtspStreamServiceImpl streamService;
     
-    @Value("${rtsp.flv.access-path:/rtspStream/flv}")
-    private String flvAccessPath;
-    
-    @Autowired(required = false)
-    private RtspStreamServiceImpl streamService;
+    public StreamAccessFilter(String hlsAccessPath, String flvAccessPath, RtspStreamServiceImpl streamService) {
+        this.hlsAccessPath = hlsAccessPath;
+        this.flvAccessPath = flvAccessPath;
+        this.streamService = streamService;
+    }
     
     @Override
     public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)

@@ -243,21 +243,60 @@
                         video.play().catch(e => console.log('播放被阻止:', e));
                     }
                 });
+                let mediaErrorCount = 0;
+                const maxMediaErrorRecover = 5;
+                
                 hls.on(Hls.Events.ERROR, function(event, data) {
+                    console.error('HLS错误:', data.type, data.details, data.fatal);
+                    
                     if (data.fatal) {
-                        showStatus('播放出错: ' + data.type, 'error');
                         switch(data.type) {
                             case Hls.ErrorTypes.NETWORK_ERROR:
-                                hls.startLoad();
+                                showStatus('网络错误，尝试恢复...', 'error');
+                                if (data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR || 
+                                    data.details === Hls.ErrorDetails.LEVEL_LOAD_ERROR) {
+                                    setTimeout(() => {
+                                        hls.startLoad();
+                                    }, 1000);
+                                } else {
+                                    hls.startLoad();
+                                }
                                 break;
                             case Hls.ErrorTypes.MEDIA_ERROR:
-                                hls.recoverMediaError();
+                                mediaErrorCount++;
+                                showStatus(`媒体错误，尝试恢复(${mediaErrorCount}/${maxMediaErrorRecover})...`, 'error');
+                                
+                                if (mediaErrorCount <= maxMediaErrorRecover) {
+                                    setTimeout(() => {
+                                        hls.recoverMediaError();
+                                    }, 500);
+                                } else {
+                                    showStatus('媒体错误恢复次数过多，重新加载...', 'error');
+                                    mediaErrorCount = 0;
+                                    hls.destroy();
+                                    setTimeout(() => {
+                                        playHls(m3u8Url);
+                                    }, 3000);
+                                }
                                 break;
                             default:
+                                showStatus('致命错误，重新加载...', 'error');
                                 hls.destroy();
+                                setTimeout(() => {
+                                    playHls(m3u8Url);
+                                }, 3000);
                                 break;
                         }
+                    } else {
+                        if (data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR || 
+                            data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
+                            console.warn('非致命错误:', data.details);
+                        }
                     }
+                });
+                
+                hls.on(Hls.Events.FRAG_CHANGED, function() {
+                    mediaErrorCount = 0;
                 });
             } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
                 video.src = m3u8Url;
