@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FLV 播放器</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .player-container {
+            text-align: center;
+            margin: 30px 0;
+        }
+        video {
+            width: 100%;
+            max-width: 1000px;
+            height: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .controls {
+            margin: 20px 0;
+            text-align: center;
+        }
+        input {
+            padding: 10px;
+            margin: 5px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            width: 300px;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button.stop {
+            background-color: #f44336;
+        }
+        button.stop:hover {
+            background-color: #d32f2f;
+        }
+        .status {
+            margin: 20px 0;
+            padding: 10px;
+            background-color: #f0f0f0;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .error {
+            color: red;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>FLV 实时播放器</h1>
+        
+        <div class="controls">
+            <input type="text" id="rtspUrl" placeholder="RTSP地址 (rtsp://...)" value="rtsp://rtspstream:qrDIMnuNzPL2cwHIg0HRA@zephyr.rtsp.stream/movie">
+            <input type="text" id="streamId" placeholder="流标识 (可选)" value="camera01">
+            <button onclick="startStream()">启动流</button>
+            <button class="stop" onclick="stopStream()">停止流</button>
+        </div>
+        
+        <div class="player-container">
+            <video id="videoElement" controls autoplay width="1000" height="560"></video>
+        </div>
+        
+        <div class="status" id="status">
+            状态: 就绪
+        </div>
+    </div>
+    
+    <script src="../flv.min.js"></script>
+    <script>
+        let player = null;
+        let currentStreamId = null;
+        let flvReadyCheckInterval = null;
+        
+        function startStream() {
+            const rtspUrl = document.getElementById('rtspUrl').value;
+            const streamId = document.getElementById('streamId').value || 'flv_' + Date.now();
+            
+            if (!rtspUrl) {
+                updateStatus('请输入RTSP地址', 'error');
+                return;
+            }
+            
+            if (!rtspUrl.startsWith('rtsp://')) {
+                updateStatus('RTSP地址格式不正确，必须以rtsp://开头', 'error');
+                return;
+            }
+            
+            updateStatus('正在启动FLV流，等待文件生成...');
+            
+            fetch('/rtspStream/startFlv', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: 'rtspUrl=' + encodeURIComponent(rtspUrl) + '&streamId=' + encodeURIComponent(streamId)
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.code === 0) {
+                    currentStreamId = data.data.streamId;
+                    updateStatus('FLV流已启动，等待文件就绪...');
+                    waitForFlvReady(currentStreamId, 30000);
+                } else {
+                    updateStatus('启动失败: ' + data.msg, 'error');
+                }
+            })
+            .catch(error => {
+                updateStatus('请求失败: ' + error.message, 'error');
+            });
+        }
+        
+        function waitForFlvReady(streamId, timeout) {
+            let elapsed = 0;
+            const checkInterval = 1000;
+            
+            if (flvReadyCheckInterval) {
+                clearInterval(flvReadyCheckInterval);
+            }
+            
+            flvReadyCheckInterval = setInterval(() => {
+                fetch('/rtspStream/flvReady?streamId=' + streamId)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.code === 0 && data.data.ready) {
+                        clearInterval(flvReadyCheckInterval);
+                        flvReadyCheckInterval = null;
+                        const flvUrl = data.data.flvUrl;
+                        updateStatus('FLV文件已就绪，正在播放...');
+                        initPlayer(flvUrl);
+                    } else {
+                        elapsed += checkInterval;
+                        if (elapsed >= timeout) {
+                            clearInterval(flvReadyCheckInterval);
+                            flvReadyCheckInterval = null;
+                            updateStatus('FLV文件生成超时，请检查RTSP源', 'error');
+                        }
+                    }
+                })
+                .catch(error => {
+                    console.error('检查FLV状态失败:', error);
+                });
+            }, checkInterval);
+        }
+        
+        function stopStream() {
+            if (!currentStreamId) {
+                updateStatus('没有正在运行的流', 'error');
+                return;
+            }
+            
+            if (flvReadyCheckInterval) {
+                clearInterval(flvReadyCheckInterval);
+                flvReadyCheckInterval = null;
+            }
+            
+            updateStatus('正在停止流...');
+            
+            fetch('/rtspStream/stop?streamId=' + encodeURIComponent(currentStreamId), {
+                method: 'POST'
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.code === 0) {
+                    if (player) {
+                        player.destroy();
+                        player = null;
+                    }
+                    updateStatus('流已停止');
+                    currentStreamId = null;
+                } else {
+                    updateStatus('停止失败: ' + data.msg, 'error');
+                }
+            })
+            .catch(error => {
+                updateStatus('请求失败: ' + error.message, 'error');
+            });
+        }
+        
+        function initPlayer(flvUrl) {
+            if (flvjs.isSupported()) {
+                const videoElement = document.getElementById('videoElement');
+                
+                if (player) {
+                    player.destroy();
+                    player = null;
+                }
+                
+                player = flvjs.createPlayer({
+                    type: 'flv',
+                    isLive: true,
+                    url: 'http://' + window.location.host + flvUrl,
+                    enableWorker: true,
+                    enableStashBuffer: false,
+                    stashInitialSize: 128,
+                    autoCleanupSourceBuffer: true,
+                    autoCleanupMaxBackwardDuration: 30,
+                    autoCleanupMinBackwardDuration: 10
+                });
+                
+                player.attachMediaElement(videoElement);
+                player.load();
+                player.play().catch(error => {
+                    console.error('播放失败:', error);
+                    updateStatus('播放失败，尝试重连...', 'error');
+                    setTimeout(() => reconnectPlayer(flvUrl), 3000);
+                });
+                
+                updateStatus('正在播放 FLV 流');
+                
+                player.on(flvjs.Events.ERROR, (errorType, errorDetail, errorInfo) => {
+                    console.error('播放器错误:', errorType, errorDetail, errorInfo);
+                    updateStatus('播放出错，3秒后自动重连...', 'error');
+                    setTimeout(() => reconnectPlayer(flvUrl), 3000);
+                });
+                
+                player.on(flvjs.Events.MEDIA_INFO, (mediaInfo) => {
+                    console.log('媒体信息:', mediaInfo);
+                });
+                
+                player.on(flvjs.Events.STATISTICS_INFO, (stats) => {
+                    if (stats.decodedFrames && stats.decodedFrames % 300 === 0) {
+                        console.log('统计信息:', stats);
+                    }
+                });
+                
+                player.on('ended', function() {
+                    console.log('播放结束，尝试重连...');
+                    updateStatus('流结束，3秒后自动重连...', 'error');
+                    setTimeout(() => reconnectPlayer(flvUrl), 3000);
+                });
+            } else {
+                updateStatus('当前浏览器不支持 FLV 播放', 'error');
+            }
+        }
+        
+        function reconnectPlayer(flvUrl) {
+            if (!currentStreamId) {
+                return;
+            }
+            
+            updateStatus('正在重连...', '');
+            
+            if (player) {
+                try {
+                    player.pause();
+                    player.unload();
+                    player.detachMediaElement();
+                    player.destroy();
+                } catch (e) {
+                    console.error('销毁播放器失败:', e);
+                }
+                player = null;
+            }
+            
+            initPlayer(flvUrl);
+        }
+        
+        function updateStatus(message, type = 'normal') {
+            const statusElement = document.getElementById('status');
+            statusElement.textContent = '状态: ' + message;
+            statusElement.className = type === 'error' ? 'status error' : 'status';
+        }
+    </script>
+</body>
+</html>

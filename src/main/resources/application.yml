@@ -1,0 +1,44 @@
+server:
+  port: 9090
+  servlet:
+    context-path: /
+
+spring:
+  thymeleaf:
+    mode: HTML
+    encoding: utf-8
+    cache: false
+  devtools:
+    restart:
+      enabled: true
+
+logging:
+  level:
+    com.video.stream: debug
+
+rtsp:
+  hls:
+    output-path: D:/video/hls
+    access-path: /rtspStream/hls
+    segment-time: 1
+    list-size: 3
+    cleanup-enabled: true
+    cleanup-interval: 3600
+  flv:
+    output-path: D:/video/flv
+    access-path: /rtspStream/flv
+    cleanup-enabled: true
+    cleanup-interval: 3600
+    max-file-size-mb: 500
+    max-file-age-hours: 24
+  stream:
+    auto-stop-enabled: true
+    auto-stop-timeout: 300000
+  ffmpeg:
+    path: D:/AI/ffmpeg-8.1/bin/ffmpeg.exe
+    preset: ultrafast
+    tune: zerolatency
+    video-codec: libx264
+    audio-codec: aac
+    audio-sample-rate: 44100
+    rtsp-transport: tcp

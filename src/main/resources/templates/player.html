@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RTSP视频流播放器</title>
+    <script src="../hls.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Microsoft YaHei', Arial, sans-serif; background: #f5f5f5; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; background: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #333; margin-bottom: 30px; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 5px; color: #666; font-weight: bold; }
+        .form-group input { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; }
+        .btn-group { display: flex; gap: 10px; margin: 20px 0; }
+        .btn { padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; color: #fff; }
+        .btn-primary { background: #1890ff; }
+        .btn-danger { background: #ff4d4f; }
+        .btn-success { background: #52c41a; }
+        .btn:hover { opacity: 0.9; }
+        .status-bar { padding: 10px; background: #f0f0f0; border-radius: 4px; margin: 15px 0; color: #333; }
+        .status-bar.success { background: #f6ffed; color: #52c41a; }
+        .status-bar.error { background: #fff2f0; color: #ff4d4f; }
+        .video-container { margin: 20px 0; background: #000; border-radius: 4px; overflow: hidden; }
+        video { width: 100%; display: block; }
+        .stream-list { margin-top: 30px; }
+        .stream-list h3 { margin-bottom: 15px; color: #333; }
+        .stream-item { padding: 10px; background: #fafafa; border: 1px solid #eee; border-radius: 4px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+        .stream-item .info { flex: 1; }
+        .stream-item .status { padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+        .stream-item .status.running { background: #f6ffed; color: #52c41a; }
+        .stream-item .status.stopped { background: #fff2f0; color: #ff4d4f; }
+        .stream-item .actions { margin-left: 10px; }
+        .stream-item .actions button { padding: 5px 10px; margin-left: 5px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; color: #fff; background: #ff4d4f; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>RTSP视频流播放器</h1>
+        
+        <div class="form-group">
+            <label>RTSP地址：</label>
+            <input type="text" id="rtspUrl" placeholder="例如: rtsp://rtspstream:qrDIMnuNzPL2cwHIg0HRA@zephyr.rtsp.stream/movie" value="rtsp://rtspstream:qrDIMnuNzPL2cwHIg0HRA@zephyr.rtsp.stream/movie">
+        </div>
+        <div class="form-group">
+            <label>流标识（可选）：</label>
+            <input type="text" id="streamId" placeholder="例如: camera01" value="camera01">
+        </div>
+        
+        <div class="btn-group">
+            <button class="btn btn-primary" onclick="startStream()">开始播放</button>
+            <button class="btn btn-danger" onclick="stopStream()">停止播放</button>
+            <button class="btn btn-success" onclick="loadStreams()">刷新列表</button>
+        </div>
+        
+        <div id="statusBar" class="status-bar">就绪</div>
+        
+        <div class="video-container">
+            <video id="videoPlayer" controls autoplay></video>
+        </div>
+        
+        <div class="stream-list">
+            <h3>活跃流列表</h3>
+            <div id="streamList"></div>
+        </div>
+    </div>
+    
+    <script>
+        let currentStreamId = null;
+        let hls = null;
+        let hlsReadyCheckInterval = null;
+        
+        function startStream() {
+            const rtspUrl = document.getElementById('rtspUrl').value.trim();
+            const streamId = document.getElementById('streamId').value.trim() || '';
+            
+            if (!rtspUrl) {
+                showStatus('请输入RTSP地址', 'error');
+                return;
+            }
+            
+            showStatus('正在启动流，等待HLS文件生成...', '');
+            
+            const formData = new FormData();
+            formData.append('rtspUrl', rtspUrl);
+            if (streamId) {
+                formData.append('streamId', streamId);
+            }
+            
+            fetch('/rtspStream/start', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.code === 0) {
+                    currentStreamId = data.data.streamId;
+                    showStatus('流已启动，等待HLS文件就绪...', 'success');
+                    waitForHlsReady(currentStreamId, 30000);
+                    loadStreams();
+                } else {
+                    showStatus('启动失败: ' + data.msg, 'error');
+                }
+            })
+            .catch(err => {
+                showStatus('请求失败: ' + err.message, 'error');
+            });
+        }
+        
+        function waitForHlsReady(streamId, timeout) {
+            let elapsed = 0;
+            const checkInterval = 1000;
+            
+            if (hlsReadyCheckInterval) {
+                clearInterval(hlsReadyCheckInterval);
+            }
+            
+            hlsReadyCheckInterval = setInterval(() => {
+                fetch('/rtspStream/hlsReady?streamId=' + streamId)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.code === 0 && data.data.ready) {
+                        clearInterval(hlsReadyCheckInterval);
+                        hlsReadyCheckInterval = null;
+                        const m3u8Url = data.data.m3u8Url;
+                        showStatus('HLS文件已就绪，正在播放...', 'success');
+                        playHls(m3u8Url);
+                    } else {
+                        elapsed += checkInterval;
+                        if (elapsed >= timeout) {
+                            clearInterval(hlsReadyCheckInterval);
+                            hlsReadyCheckInterval = null;
+                            showStatus('HLS文件生成超时，请检查RTSP源', 'error');
+                        }
+                    }
+                })
+                .catch(err => {
+                    console.error('检查HLS状态失败:', err);
+                });
+            }, checkInterval);
+        }
+        
+        function stopStream() {
+            if (!currentStreamId) {
+                showStatus('没有正在播放的流', 'error');
+                return;
+            }
+            
+            if (hlsReadyCheckInterval) {
+                clearInterval(hlsReadyCheckInterval);
+                hlsReadyCheckInterval = null;
+            }
+            
+            fetch('/rtspStream/stop?streamId=' + currentStreamId, { method: 'POST' })
+            .then(response => response.json())
+            .then(data => {
+                if (data.code === 0) {
+                    showStatus('流已停止', 'success');
+                    if (hls) {
+                        hls.destroy();
+                        hls = null;
+                    }
+                    currentStreamId = null;
+                    loadStreams();
+                }
+            });
+        }
+        
+        function loadStreams() {
+            fetch('/rtspStream/streams')
+            .then(response => response.json())
+            .then(data => {
+                const streamList = document.getElementById('streamList');
+                const streams = data.data || {};
+                
+                if (Object.keys(streams).length === 0) {
+                    streamList.innerHTML = '<p style="color:#999;">暂无活跃流</p>';
+                    return;
+                }
+                
+                streamList.innerHTML = Object.entries(streams).map(([id, status]) => `
+                    <div class="stream-item">
+                        <div class="info">
+                            <strong>${id}</strong><br>
+                            <small style="color:#999;">${status}</small>
+                        </div>
+                        <span class="status ${status === 'running' ? 'running' : 'stopped'}">${status === 'running' ? '运行中' : '已停止'}</span>
+                        <div class="actions">
+                            <button onclick="stopStreamById('${id}')">停止</button>
+                        </div>
+                    </div>
+                `).join('');
+            });
+        }
+        
+        function stopStreamById(streamId) {
+            fetch('/rtspStream/stop?streamId=' + streamId, { method: 'POST' })
+            .then(response => response.json())
+            .then(data => {
+                if (data.code === 0) {
+                    showStatus('流 ' + streamId + ' 已停止', 'success');
+                    if (currentStreamId === streamId && hls) {
+                        hls.destroy();
+                        hls = null;
+                        currentStreamId = null;
+                    }
+                    loadStreams();
+                }
+            });
+        }
+        
+        function playHls(m3u8Url) {
+            const video = document.getElementById('videoPlayer');
+            
+            if (hls) {
+                hls.destroy();
+                hls = null;
+            }
+            
+            if (Hls.isSupported()) {
+                hls = new Hls({
+                    liveSyncDurationCount: 2,
+                    liveMaxLatencyDurationCount: 4,
+                    enableWorker: true,
+                    lowLatencyMode: true,
+                    maxBufferLength: 10,
+                    maxMaxBufferLength: 30,
+                    startLevel: -1,
+                    testBandwidth: true,
+                    progressive: true,
+                    xhrSetup: function(xhr) {
+                        xhr.setRequestHeader('Cache-Control', 'no-cache');
+                    }
+                });
+                hls.loadSource(m3u8Url);
+                hls.attachMedia(video);
+                hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                    video.play().catch(e => console.log('自动播放被阻止:', e));
+                });
+                hls.on(Hls.Events.FRAG_BUFFERED, function() {
+                    if (video.paused) {
+                        video.play().catch(e => console.log('播放被阻止:', e));
+                    }
+                });
+                hls.on(Hls.Events.ERROR, function(event, data) {
+                    if (data.fatal) {
+                        showStatus('播放出错: ' + data.type, 'error');
+                        switch(data.type) {
+                            case Hls.ErrorTypes.NETWORK_ERROR:
+                                hls.startLoad();
+                                break;
+                            case Hls.ErrorTypes.MEDIA_ERROR:
+                                hls.recoverMediaError();
+                                break;
+                            default:
+                                hls.destroy();
+                                break;
+                        }
+                    }
+                });
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                video.src = m3u8Url;
+                video.addEventListener('loadedmetadata', function() {
+                    video.play();
+                });
+            } else {
+                showStatus('浏览器不支持HLS播放', 'error');
+            }
+        }
+        
+        function showStatus(message, type) {
+            const statusBar = document.getElementById('statusBar');
+            statusBar.textContent = message;
+            statusBar.className = 'status-bar ' + (type || '');
+        }
+        
+        loadStreams();
+    </script>
+</body>
+</html>
