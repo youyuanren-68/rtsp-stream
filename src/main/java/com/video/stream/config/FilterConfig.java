@@ -9,9 +9,9 @@ import org.springframework.context.annotation.Configuration;
 public class FilterConfig {
     
     @Bean
-    public FilterRegistrationBean<StreamAccessFilter> streamAccessFilter(StreamAccessFilter filter) {
+    public FilterRegistrationBean<StreamAccessFilter> streamAccessFilter() {
         FilterRegistrationBean<StreamAccessFilter> registrationBean = new FilterRegistrationBean<>();
-        registrationBean.setFilter(filter);
+        registrationBean.setFilter(new StreamAccessFilter());
         registrationBean.addUrlPatterns("/rtspStream/hls/*", "/rtspStream/flv/*");
         registrationBean.setOrder(1);
         return registrationBean;
