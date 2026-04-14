@@ -20,4 +20,10 @@ public interface IRtspStreamService {
     boolean isHlsFileReady(String streamId);
     
     boolean isFlvFileReady(String streamId);
+
+    void recordStreamAccess(String streamId);
+
+    void tryRecoverStream(String streamId);
+
+    long getFlvFileLastModified(String streamId);
 }

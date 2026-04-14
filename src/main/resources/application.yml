@@ -2,6 +2,10 @@ server:
   port: 9090
   servlet:
     context-path: /
+  tomcat:
+    async-timeout: 3600000
+    connection-timeout: 3600000
+    keep-alive-timeout: 3600000
 
 spring:
   thymeleaf:
@@ -21,19 +25,21 @@ rtsp:
     output-path: D:/video/hls
     access-path: /rtspStream/hls
     segment-time: 1
-    list-size: 3
+    list-size: 10
     cleanup-enabled: true
-    cleanup-interval: 3600
+    cleanup-interval: 120000
   flv:
     output-path: D:/video/flv
     access-path: /rtspStream/flv
     cleanup-enabled: true
-    cleanup-interval: 3600
+    cleanup-interval: 120000
     max-file-size-mb: 500
     max-file-age-hours: 24
   stream:
     auto-stop-enabled: true
-    auto-stop-timeout: 300000
+    auto-stop-timeout: 60000
+    max-concurrent-streams: 50
+    max-reconnect-attempts: 10
   ffmpeg:
     path: D:/AI/ffmpeg-8.1/bin/ffmpeg.exe
     preset: ultrafast

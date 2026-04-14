@@ -152,7 +152,8 @@
                 hlsReadyCheckInterval = null;
             }
             
-            fetch('/rtspStream/stop?streamId=' + currentStreamId, { method: 'POST' })
+            fetch('/rtspStream/stop?streamId=' + encodeURIComponent(currentStreamId), {
+                method: 'POST' })
             .then(response => response.json())
             .then(data => {
                 if (data.code === 0) {
@@ -220,12 +221,12 @@
             
             if (Hls.isSupported()) {
                 hls = new Hls({
-                    liveSyncDurationCount: 2,
-                    liveMaxLatencyDurationCount: 4,
+                    liveSyncDurationCount: 3,
+                    liveMaxLatencyDurationCount: 7,
                     enableWorker: true,
                     lowLatencyMode: true,
-                    maxBufferLength: 10,
-                    maxMaxBufferLength: 30,
+                    maxBufferLength: 30,
+                    maxMaxBufferLength: 60,
                     startLevel: -1,
                     testBandwidth: true,
                     progressive: true,

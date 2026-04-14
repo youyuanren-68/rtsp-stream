@@ -1,12 +1,11 @@
 package com.video.stream.controller;
 
-import com.video.stream.service.impl.RtspStreamServiceImpl;
+import com.video.stream.service.IRtspStreamService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -17,136 +16,200 @@ import java.nio.file.Paths;
 @RestController
 @RequestMapping("/rtspStream/flv")
 public class FlvStreamController {
-    
+
     private static final Logger log = LoggerFactory.getLogger(FlvStreamController.class);
-    
+
     @Value("${rtsp.flv.output-path:D:/video/flv}")
     private String flvOutputPath;
-    
-    @Autowired(required = false)
-    private RtspStreamServiceImpl streamService;
-    
+
+    @Autowired
+    private IRtspStreamService streamService;
+
+    /**
+     * 同步 void 方法 —— 不返回任何 Spring 异步类型，
+     * 所有 write 异常在方法内部消化，不传播到 Spring/Tomcat。
+     */
     @GetMapping("/{streamId}/live.flv")
-    public StreamingResponseBody streamFlv(
-            @PathVariable String streamId,
-            HttpServletRequest request,
-            HttpServletResponse response) {
-        
-        Path flvPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
-        File flvFile = flvPath.toFile();
-        
-        if (!flvFile.exists()) {
-            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
-            log.warn("FLV文件不存在: streamId={}", streamId);
-            return outputStream -> {};
+    public void streamFlv(@PathVariable String streamId,
+                          HttpServletRequest request,
+                          HttpServletResponse response) {
+
+        // 恢复已停止的流
+        streamService.tryRecoverStream(streamId);
+
+        // FFmpeg 恢复后需要时间创建文件，最多等待3秒
+        File flvFile = null;
+        for (int i = 0; i < 30; i++) {
+            Path flvPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
+            File f = flvPath.toFile();
+            if (f.exists() && f.length() > 0) {
+                flvFile = f;
+                break;
+            }
+            try { Thread.sleep(100); } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
         }
-        
+
+        if (flvFile == null) {
+            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+            log.warn("FLV文件不存在或为空: streamId={}", streamId);
+            return;
+        }
+
         response.setContentType("video/x-flv");
         response.setHeader("Cache-Control", "no-cache");
         response.setHeader("Pragma", "no-cache");
         response.setHeader("Access-Control-Allow-Origin", "*");
         response.setHeader("Connection", "keep-alive");
         response.setHeader("Transfer-Encoding", "chunked");
-        
-        if (streamService != null) {
-            streamService.recordStreamAccess(streamId);
-        }
-        
-        return outputStream -> {
-            RandomAccessFile raf = null;
-            try {
-                raf = new RandomAccessFile(flvFile, "r");
-                byte[] buffer = new byte[8192];
-                int noDataCount = 0;
-                int maxNoDataCount = 1800;
-                long lastAccessUpdate = System.currentTimeMillis();
-                long lastFileSize = 0;
-                int stableCount = 0;
-                
-                while (noDataCount < maxNoDataCount) {
-                    long fileLength = raf.length();
-                    long currentPosition = raf.getFilePointer();
-                    
-                    if (currentPosition >= fileLength) {
-                        if (fileLength == lastFileSize) {
-                            stableCount++;
-                            if (stableCount > 50) {
-                                log.warn("[FLV-{}] FFmpeg可能已停止写入，文件大小: {}", streamId, fileLength);
+
+        streamService.recordStreamAccess(streamId);
+
+        // 同步流式传输，所有异常本地消化
+        RandomAccessFile raf = null;
+        OutputStream out = null;
+        try {
+            out = response.getOutputStream();
+            raf = new RandomAccessFile(flvFile, "r");
+
+            byte[] buffer = new byte[8192];
+            int noDataCount = 0;
+            int maxNoDataCount = 36000;
+            long lastAccessUpdate = System.currentTimeMillis();
+            long lastFileSize = 0;
+            int stableCount = 0;
+            // 给足 30 分钟容忍 FFmpeg 重启/写入间隙
+            int stableCountLimit = 18000;
+            long totalBytesSent = 0;
+
+            // 文件切换阈值：当 FFmpeg 仍在运行但文件不增长超过此次数时，尝试切换到新文件
+            int fileSwitchThreshold = 300; // 300 * 20ms = 6秒
+
+            log.info("[FLV-{}] 开始流式传输: {}", streamId, flvFile.getAbsolutePath());
+
+            while (noDataCount < maxNoDataCount) {
+                long fileLength = raf.length();
+                long currentPosition = raf.getFilePointer();
+
+                if (currentPosition >= fileLength) {
+                    if (fileLength == lastFileSize) {
+                        stableCount++;
+                        if (stableCount > stableCountLimit) {
+                            // FFmpeg 还在运行时，给予更多容忍时间
+                            boolean active = streamService.isStreamActive(streamId);
+                            if (active) {
+                                log.warn("[FLV-{}] FFmpeg进程运行中但文件{}秒未增长，继续等待", streamId, stableCountLimit / 10);
+                                Thread.sleep(500);
+                                continue;
                             }
-                        } else {
-                            stableCount = 0;
-                            lastFileSize = fileLength;
+                            log.warn("[FLV-{}] FFmpeg已停止写入超过{}秒，文件大小: {}MB, 已发送: {}MB",
+                                    streamId, stableCountLimit / 10,
+                                    fileLength / (1024 * 1024), totalBytesSent / (1024 * 1024));
+                            break;
                         }
-                        
-                        noDataCount++;
-                        if (noDataCount % 100 == 0) {
-                            log.debug("[FLV-{}] 等待新数据: position={}, fileLength={}", streamId, currentPosition, fileLength);
-                        }
-                        Thread.sleep(100);
-                        continue;
-                    }
-                    
-                    stableCount = 0;
-                    int bytesRead = raf.read(buffer);
-                    if (bytesRead > 0) {
-                        outputStream.write(buffer, 0, bytesRead);
-                        outputStream.flush();
-                        noDataCount = 0;
-                        
-                        long now = System.currentTimeMillis();
-                        if (now - lastAccessUpdate > 60000) {
-                            if (streamService != null) {
-                                streamService.recordStreamAccess(streamId);
+
+                        // 检测到 FFmpeg 可能已重启（文件被重命名），尝试切换到新文件
+                        if (stableCount == fileSwitchThreshold && streamService.isStreamActive(streamId)) {
+                            Path newFlvPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
+                            File newFlvFile = newFlvPath.toFile();
+                            if (newFlvFile.exists() && !newFlvFile.getAbsolutePath().equals(flvFile.getAbsolutePath())) {
+                                log.info("[FLV-{}] 检测到新FLV文件，切换读取: {} (旧文件: {}MB, 新文件: {}MB)",
+                                        streamId, newFlvFile.getAbsolutePath(),
+                                        fileLength / (1024 * 1024), newFlvFile.length() / (1024 * 1024));
+                                try { raf.close(); } catch (IOException ignored) {}
+                                raf = new RandomAccessFile(newFlvFile, "r");
+                                flvFile = newFlvFile;
+                                stableCount = 0;
+                                lastFileSize = 0;
+                                continue;
                             }
-                            lastAccessUpdate = now;
                         }
                     } else {
-                        noDataCount++;
-                        Thread.sleep(50);
+                        stableCount = 0;
+                        lastFileSize = fileLength;
                     }
+
+                    noDataCount++;
+                    if (noDataCount % 1000 == 0) {
+                        log.debug("[FLV-{}] 等待新数据: position={}, fileLength={}",
+                                streamId, currentPosition, fileLength);
+                    }
+                    // 缩短等待时间，从 100ms 改为 20ms，避免播放器缓冲区耗尽导致暂停
+                    Thread.sleep(20);
+                    continue;
                 }
-                
-                log.warn("[FLV-{}] 超时退出: 超过{}秒无新数据", streamId, (maxNoDataCount * 100) / 1000);
-                
-            } catch (IOException e) {
-                if (e.getMessage() != null && (e.getMessage().contains("Broken pipe") || e.getMessage().contains("Connection reset"))) {
-                    log.debug("[FLV-{}] 客户端断开连接", streamId);
+
+                stableCount = 0;
+                int bytesRead = raf.read(buffer);
+                if (bytesRead > 0) {
+                    out.write(buffer, 0, bytesRead);
+                    out.flush();
+                    noDataCount = 0;
+                    totalBytesSent += bytesRead;
+
+                    long now = System.currentTimeMillis();
+                    if (now - lastAccessUpdate > 5000) {
+                        streamService.recordStreamAccess(streamId);
+                        lastAccessUpdate = now;
+                    }
                 } else {
-                    log.error("[FLV-{}] 流传输IO异常", streamId, e);
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                log.debug("[FLV-{}] 流传输被中断", streamId);
-            } finally {
-                if (raf != null) {
-                    try {
-                        raf.close();
-                    } catch (IOException e) {
-                        log.debug("关闭RandomAccessFile失败", e);
-                    }
+                    noDataCount++;
+                    // 读到 EOF 但也短暂等待
+                    Thread.sleep(20);
                 }
             }
-        };
+
+            log.info("[FLV-{}] 流传输结束: 已发送 {}MB", streamId, totalBytesSent / (1024 * 1024));
+
+        } catch (IOException e) {
+            String msg = e.getMessage();
+            if (isClientDisconnect(msg)) {
+                log.info("[FLV-{}] 客户端断开连接，停止拉流", streamId);
+                streamService.stopStream(streamId);
+            } else {
+                log.debug("[FLV-{}] 流结束: {}", streamId, msg != null ? msg : e.getClass().getSimpleName());
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.debug("[FLV-{}] 流传输被中断", streamId);
+        } catch (Exception e) {
+            log.debug("[FLV-{}] 流传输异常: {}", streamId, e.getMessage());
+        } finally {
+            if (raf != null) {
+                try { raf.close(); } catch (IOException ignored) {}
+            }
+        }
     }
-    
+
+    private boolean isClientDisconnect(String msg) {
+        if (msg == null) return false;
+        return msg.contains("Broken pipe")
+                || msg.contains("Connection reset")
+                || msg.contains("远程主机")
+                || msg.contains("An established connection")
+                || msg.contains("Software caused connection abort");
+    }
+
     @GetMapping("/{streamId}/live.flv/head")
     public void getFlvHead(@PathVariable String streamId, HttpServletResponse response) {
         Path flvPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
         File flvFile = flvPath.toFile();
-        
+
         if (!flvFile.exists()) {
             response.setStatus(HttpServletResponse.SC_NOT_FOUND);
             return;
         }
-        
+
         response.setContentType("application/json");
         response.setCharacterEncoding("UTF-8");
         response.setHeader("Access-Control-Allow-Origin", "*");
-        
+
         try (PrintWriter writer = response.getWriter()) {
             writer.write("{\"exists\":true,\"size\":" + flvFile.length() + ",\"lastModified\":" + flvFile.lastModified() + "}");
         } catch (IOException e) {
-            e.printStackTrace();
+            log.error("获取FLV头信息失败", e);
         }
     }
 }
