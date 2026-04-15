@@ -790,84 +790,11 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                 activeProcesses.remove(streamId);
                 hlsFileReady.remove(streamId);
                 flvFileReady.remove(streamId);
-
-                // 检查是否超过最大重连次数
-                int attempts = reconnectAttempts.getOrDefault(streamId, 0);
-                if (attempts >= maxReconnectAttempts) {
-                    log.error("[FFmpeg-{}] {}流已达到最大重连次数({})，不再重连", streamId,
-                            capturedType != null ? capturedType.toUpperCase() : "UNKNOWN", maxReconnectAttempts);
-                    streamStatus.put(streamId, "error: max_reconnect_attempts");
-                    cleanupStreamThreads(streamId);
-                    cleanupStreamState(streamId);
-                    return;
-                }
-
-                if (capturedRtspUrl != null && hasRecentViewer(streamId)) {
-                    // 指数退避延迟
-                    long delay = calculateReconnectDelay(attempts);
-                    log.info("[FFmpeg-{}] {}流已退出，{}ms后尝试重连(第{}次)", streamId,
-                            capturedType != null ? capturedType.toUpperCase() : "UNKNOWN", delay, attempts + 1);
-                    streamStatus.put(streamId, "reconnecting...");
-
-                    Thread.sleep(delay);
-
-                    // 重连前再次检查是否有观众，避免无效重连
-                    if (!hasRecentViewer(streamId)) {
-                        log.info("[FFmpeg-{}] {}流退避期间观众已离开，取消重连", streamId,
-                                capturedType != null ? capturedType.toUpperCase() : "UNKNOWN");
-                        streamStatus.put(streamId, "stopped: no viewers");
-                        cleanupStreamThreads(streamId);
-                        cleanupStreamState(streamId);
-                        return;
-                    }
-
-                    try {
-                        // 清理残留状态，再启动新流
-                        cleanupStreamState(streamId);
-                        // 恢复必要状态（cleanupStreamState 会移除它们）
-                        streamRtspUrls.put(streamId, capturedRtspUrl);
-                        streamType.put(streamId, capturedType);
-
-                        boolean success;
-                        if ("hls".equals(capturedType)) {
-                            success = startStream(capturedRtspUrl, streamId);
-                        } else if ("flv".equals(capturedType)) {
-                            success = startFlvStream(capturedRtspUrl, streamId);
-                        } else {
-                            log.error("[FFmpeg-{}] 未知流类型: {}", streamId, capturedType);
-                            streamStatus.put(streamId, "error: unknown type");
-                            return;
-                        }
-
-                        if (success) {
-                            log.info("[FFmpeg-{}] {}流重连成功", streamId,
-                                    capturedType != null ? capturedType.toUpperCase() : "UNKNOWN");
-                            // 重连成功，重置计数器
-                            reconnectAttempts.remove(streamId);
-                            lastReconnectTime.remove(streamId);
-                            // 旧线程会自然终止（IOException/超时），不需要中断
-                        } else {
-                            log.error("[FFmpeg-{}] {}流重连失败", streamId,
-                                    capturedType != null ? capturedType.toUpperCase() : "UNKNOWN");
-                            reconnectAttempts.put(streamId, attempts + 1);
-                            lastReconnectTime.put(streamId, System.currentTimeMillis());
-                            streamStatus.put(streamId, "reconnect_failed");
-                        }
-                    } catch (Exception e) {
-                        log.error("[FFmpeg-{}] {}流重连异常: {}", streamId,
-                                capturedType != null ? capturedType.toUpperCase() : "UNKNOWN", e.getMessage(), e);
-                        reconnectAttempts.put(streamId, attempts + 1);
-                        lastReconnectTime.put(streamId, System.currentTimeMillis());
-                        streamStatus.put(streamId, "reconnect_error: " + e.getMessage());
-                    }
-                } else if (capturedRtspUrl != null) {
-                    log.info("[FFmpeg-{}] {}流已退出，无活跃观众，不再重连", streamId,
-                            capturedType != null ? capturedType.toUpperCase() : "UNKNOWN");
-                    streamStatus.put(streamId, "stopped: no viewers");
-                } else {
-                    log.warn("[FFmpeg-{}] 无法获取RTSP地址，不重连", streamId);
-                    streamStatus.put(streamId, "exited with code " + exitCode + ", no rtsp url");
-                }
+                streamStatus.put(streamId, "exited with code " + exitCode);
+                log.info("[FFmpeg-{}] {}进程状态已标记为exited，等待健康检查或拦截器恢复", streamId,
+                        capturedType != null ? capturedType.toUpperCase() : "UNKNOWN");
+                // 进程监控不再主动重连，交由拦截器或健康检查统一处理
+                // 避免与拦截器的tryRecoverStream和健康检查冲突
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 log.error("[FFmpeg-{}] 进程监控被中断", streamId);
