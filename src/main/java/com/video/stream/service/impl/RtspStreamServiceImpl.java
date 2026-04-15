@@ -1120,20 +1120,13 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             return;
         }
 
-        // 如果 FFmpeg 进程正在运行且未卡死，直接返回
+        // 如果 FFmpeg 进程正在运行，不干预（file.lastModified 不可靠，缓冲区写入会导致误判）
+        // 流卡死的情况由定时健康检查（60秒间隔）统一处理，避免每次请求都触发误杀
         if (process != null && process.isAlive()) {
-            if (!isStreamStuck(streamId, type)) {
-                return;
-            }
-            log.warn("[恢复-{}-{}] 进程卡死（文件超过30秒未写入），强制重启", streamId, type);
-        } else {
-            log.warn("[恢复-{}-{}] 流已停止，尝试恢复 (type={})", streamId, type);
+            return;
         }
 
-        // 停止旧进程（使用进程树清理）
-        if (process != null && process.isAlive()) {
-            killProcessTree(process, streamId);
-        }
+        log.warn("[恢复-{}-{}] 流已停止，尝试恢复", streamId, type);
 
         // 清理旧监控线程
         cleanupStreamThreads(streamId);
@@ -1209,37 +1202,6 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         }
     }
 
-    /**
-     * 检测流是否卡死：文件超过30秒未写入
-     */
-    private boolean isStreamStuck(String streamId, String type) {
-        String outputDir = "flv".equals(type) ? flvOutputPath : hlsOutputPath;
-        String outputFile;
-        if ("flv".equals(type)) {
-            outputFile = outputDir + "/" + streamId + "/live.flv";
-        } else {
-            outputFile = outputDir + "/" + streamId + "/index.m3u8";
-        }
-
-        File file = new File(outputFile);
-        Long startTime = streamStartTime.get(streamId);
-        if (startTime != null) {
-            long elapsed = System.currentTimeMillis() - startTime;
-            // 流刚启动，给 FFmpeg 足够时间创建文件（最长60秒）
-            if (elapsed < 60000 && !file.exists()) {
-                return false;
-            }
-        }
-
-        if (!file.exists()) {
-            return true;
-        }
-
-        long lastModified = file.lastModified();
-        long fileElapsed = System.currentTimeMillis() - lastModified;
-        return fileElapsed > 30000;
-    }
-    
     private void startFlvFileMonitor(String streamId, String flvPath) {
         Thread monitorThread = new Thread(() -> {
             int maxWaitTime = 30000;
