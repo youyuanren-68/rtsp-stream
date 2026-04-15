@@ -208,28 +208,30 @@
         function initPlayer(flvUrl) {
             if (flvjs.isSupported()) {
                 const videoElement = document.getElementById('videoElement');
-                
+
                 if (player) {
                     player.destroy();
                     player = null;
                 }
-                
+
                 player = flvjs.createPlayer({
                     type: 'flv',
                     isLive: true,
                     url: 'http://' + window.location.host + flvUrl,
                     enableWorker: true,
-                    enableStashBuffer: true,
-                    stashInitialSize: 256,
+                    enableStashBuffer: false,
+                    stashInitialSize: 128,
                     autoCleanupSourceBuffer: true,
-                    autoCleanupMaxBackwardDuration: 60,
-                    autoCleanupMinBackwardDuration: 30,
+                    autoCleanupMaxBackwardDuration: 30,
+                    autoCleanupMinBackwardDuration: 15,
                     liveBufferLatencyAction: 'jump',
                     liveSyncDurationCount: 3,
                     lazyLoad: false,
-                    lazyLoadMaxDuration: 120
+                    lazyLoadMaxDuration: 60,
+                    fixAudioTimestampGap: true,
+                    accurateSeek: false
                 });
-                
+
                 player.attachMediaElement(videoElement);
                 player.load();
                 player.play().catch(error => {
@@ -237,22 +239,58 @@
                     updateStatus('播放失败，尝试重连...', 'error');
                     setTimeout(() => reconnectPlayer(flvUrl), 3000);
                 });
-                
+
                 updateStatus('正在播放 FLV 流');
-                
+
                 let reconnectAttempts = 0;
                 const maxReconnectAttempts = 10;
-                
+
+                // 监听视频元素卡顿事件
+                let stallTimer = null;
+                videoElement.addEventListener('stalled', function() {
+                    console.warn('[FLV] 视频元素卡住，启动恢复计时器');
+                    if (stallTimer) clearTimeout(stallTimer);
+                    stallTimer = setTimeout(function() {
+                        console.warn('[FLV] 卡住超过5秒，尝试恢复');
+                        reconnectAttempts++;
+                        if (reconnectAttempts < maxReconnectAttempts) {
+                            reconnectPlayer(flvUrl);
+                        } else {
+                            updateStatus('重连次数过多，请检查流状态', 'error');
+                        }
+                    }, 5000);
+                });
+
+                videoElement.addEventListener('playing', function() {
+                    if (stallTimer) {
+                        clearTimeout(stallTimer);
+                        stallTimer = null;
+                    }
+                    reconnectAttempts = 0;
+                });
+
+                videoElement.addEventListener('waiting', function() {
+                    console.warn('[FLV] 视频等待缓冲');
+                    if (stallTimer) clearTimeout(stallTimer);
+                    stallTimer = setTimeout(function() {
+                        console.warn('[FLV] 等待缓冲超过5秒，尝试恢复');
+                        reconnectAttempts++;
+                        if (reconnectAttempts < maxReconnectAttempts) {
+                            reconnectPlayer(flvUrl);
+                        }
+                    }, 5000);
+                });
+
                 player.on(flvjs.Events.ERROR, (errorType, errorDetail, errorInfo) => {
                     console.error('播放器错误:', errorType, errorDetail, errorInfo);
-                    
+
                     if (errorType === flvjs.ErrorTypes.MEDIA_ERROR) {
                         updateStatus('媒体错误，尝试恢复...', 'error');
-                        
+
                         if (reconnectAttempts < maxReconnectAttempts) {
                             reconnectAttempts++;
                             const delay = Math.min(1000 * reconnectAttempts, 5000);
-                            updateStatus(`播放出错，${delay/1000}秒后自动重连(第${reconnectAttempts}次)...`, 'error');
+                            updateStatus('播放出错，' + (delay/1000) + '秒后自动重连(第' + reconnectAttempts + '次)...', 'error');
                             setTimeout(() => {
                                 if (player) {
                                     try {
@@ -274,23 +312,33 @@
                         }
                     } else if (errorType === flvjs.ErrorTypes.NETWORK_ERROR) {
                         updateStatus('网络错误，尝试重连...', 'error');
-                        setTimeout(() => reconnectPlayer(flvUrl), 3000);
+                        reconnectAttempts++;
+                        if (reconnectAttempts < maxReconnectAttempts) {
+                            setTimeout(() => reconnectPlayer(flvUrl), 3000);
+                        } else {
+                            updateStatus('重连次数过多，请检查流状态', 'error');
+                        }
                     } else {
                         updateStatus('播放出错，3秒后自动重连...', 'error');
-                        setTimeout(() => reconnectPlayer(flvUrl), 3000);
+                        reconnectAttempts++;
+                        if (reconnectAttempts < maxReconnectAttempts) {
+                            setTimeout(() => reconnectPlayer(flvUrl), 3000);
+                        } else {
+                            updateStatus('重连次数过多，请检查流状态', 'error');
+                        }
                     }
                 });
-                
+
                 player.on(flvjs.Events.MEDIA_INFO, (mediaInfo) => {
                     console.log('媒体信息:', mediaInfo);
                 });
-                
+
                 player.on(flvjs.Events.STATISTICS_INFO, (stats) => {
                     if (stats.decodedFrames && stats.decodedFrames % 300 === 0) {
                         console.log('统计信息:', stats);
                     }
                 });
-                
+
                 player.on('ended', function() {
                     console.log('播放结束，尝试重连...');
                     updateStatus('流结束，3秒后自动重连...', 'error');
