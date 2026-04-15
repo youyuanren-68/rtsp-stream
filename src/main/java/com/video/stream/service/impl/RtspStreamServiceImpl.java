@@ -497,9 +497,9 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
     }
 
     /**
-     * 彻底终止 FFmpeg 进程。
-     * 先优雅 destroy()，等 2 秒；未退出则强制 destroyForcibly()。
-     * Windows 上再补充 taskkill /F /T 确保子进程被清理。
+     * 终止 FFmpeg 进程。
+     * 先 destroy() 优雅终止，等 2 秒；未退出则 destroyForcibly() 强制终止。
+     * 不调用外部命令（taskkill），避免子进程阻塞导致 Tomcat 线程卡死。
      */
     private void killProcessTree(Process process, String streamId) {
         if (process == null || !process.isAlive()) {
@@ -517,33 +517,16 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             Thread.currentThread().interrupt();
         }
 
-        // 第二步：强制终止
+        // 第二步：强制终止（Windows 上 destroyForcibly 会调用 TerminateProcess）
         process.destroyForcibly();
         try {
-            if (process.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)) {
+            if (process.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
                 log.info("[进程清理] FFmpeg 进程已强制退出: streamId={}", streamId);
-                return;
+            } else {
+                log.warn("[进程清理] FFmpeg 进程强制退出超时: streamId={}", streamId);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-        }
-
-        // 第三步：Windows 上使用 taskkill 确保进程树被清理
-        try {
-            String os = System.getProperty("os.name").toLowerCase();
-            if (os.contains("win")) {
-                ProcessBuilder killer = new ProcessBuilder(
-                    "cmd", "/c", "taskkill /F /IM ffmpeg.exe /T >nul 2>&1");
-                killer.redirectErrorStream(true);
-                Process killProc = killer.start();
-                // 限制等待时间，避免 cmd 卡住
-                if (!killProc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
-                    killProc.destroyForcibly();
-                }
-                log.info("[进程清理] 已执行 taskkill 清理 ffmpeg 进程树: streamId={}", streamId);
-            }
-        } catch (Exception e) {
-            log.warn("[进程清理] taskkill 执行失败: streamId={}, error={}", streamId, e.getMessage());
         }
     }
 
