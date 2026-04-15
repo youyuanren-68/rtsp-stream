@@ -411,6 +411,10 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
 
         // 统一清理所有状态
         cleanupStreamState(streamId);
+
+        // 立即清理磁盘文件，不等待定时任务
+        cleanupStreamFiles(streamId);
+
         return true;
     }
     
@@ -495,6 +499,30 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             }
             // 不再使用 thread.join 阻塞等待，让线程自然退出
             // 避免因 FFmpeg 进程卡住导致请求线程长时间阻塞
+        }
+    }
+
+    /**
+     * 清理指定流的磁盘文件（HLS目录或FLV目录）。
+     * 在 stopStream 时立即调用，不等待定时清理任务。
+     */
+    private void cleanupStreamFiles(String streamId) {
+        // 清理HLS目录
+        File hlsDir = new File(hlsOutputPath, streamId);
+        if (hlsDir.exists()) {
+            long dirSize = getDirectorySize(hlsDir);
+            if (deleteDirectory(hlsDir)) {
+                log.info("[文件清理] 已删除HLS流目录: {}, 大小: {}MB", streamId, dirSize / (1024 * 1024));
+            }
+        }
+
+        // 清理FLV目录
+        File flvDir = new File(flvOutputPath, streamId);
+        if (flvDir.exists()) {
+            long dirSize = getDirectorySize(flvDir);
+            if (deleteDirectory(flvDir)) {
+                log.info("[文件清理] 已删除FLV流目录: {}, 大小: {}MB", streamId, dirSize / (1024 * 1024));
+            }
         }
     }
 
@@ -756,10 +784,10 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         if (files == null || files.length == 0) {
             return;
         }
-        
+
         long now = System.currentTimeMillis();
         long maxAgeMs = 24 * 60 * 60 * 1000L;
-        
+
         for (File file : files) {
             if (file.isFile() && file.getName().endsWith(".flv")) {
                 long fileAge = now - file.lastModified();
@@ -771,6 +799,40 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * 清理指定 streamId 目录下的历史 FLV 文件（live_TIMESTAMP.flv），
+     * 只保留 live.flv（当前 FFmpeg 正在写入的文件）。
+     * 在 restartFlvStream / tryRecoverStream 后立即调用，避免文件堆积。
+     */
+    private void cleanupFlvHistoryFiles(String streamId) {
+        File streamDir = new File(flvOutputPath, streamId);
+        if (!streamDir.exists() || !streamDir.isDirectory()) {
+            return;
+        }
+
+        File[] files = streamDir.listFiles();
+        if (files == null || files.length == 0) {
+            return;
+        }
+
+        int cleaned = 0;
+        long totalSize = 0;
+        for (File file : files) {
+            if (file.isFile() && file.getName().endsWith(".flv") && !file.getName().equals("live.flv")) {
+                long fileSize = file.length();
+                if (file.delete()) {
+                    cleaned++;
+                    totalSize += fileSize;
+                }
+            }
+        }
+
+        if (cleaned > 0) {
+            log.info("[FLV清理] 清理流 {} 的历史FLV文件: {} 个, 释放空间: {}MB",
+                    streamId, cleaned, totalSize / (1024 * 1024));
         }
     }
     
@@ -1027,6 +1089,10 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
 
             if (success) {
                 log.info("[恢复-{}-{}] 恢复成功", type, streamId);
+                // FLV流恢复后清理历史FLV文件
+                if ("flv".equals(type)) {
+                    cleanupFlvHistoryFiles(streamId);
+                }
             } else {
                 log.error("[恢复-{}-{}] 恢复失败", type, streamId);
             }
@@ -1180,6 +1246,8 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                 boolean success = startFlvStream(rtspUrl, streamId);
                 if (success) {
                     log.info("[FLV重启-{}] FLV流重启成功", streamId);
+                    // 新流启动后清理所有历史FLV文件（live_TIMESTAMP.flv）
+                    cleanupFlvHistoryFiles(streamId);
                 } else {
                     log.error("[FLV重启-{}] FLV流重启失败", streamId);
                 }
