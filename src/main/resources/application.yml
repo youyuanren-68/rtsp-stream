@@ -37,7 +37,7 @@ rtsp:
     max-file-age-hours: 24
   stream:
     auto-stop-enabled: true
-    auto-stop-timeout: 60000
+    auto-stop-timeout: 1800000
     max-concurrent-streams: 50
     max-reconnect-attempts: 10
   ffmpeg:
