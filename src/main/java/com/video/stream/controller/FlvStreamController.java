@@ -52,9 +52,37 @@ public class FlvStreamController {
             }
         }
 
+        // 文件未找到：流不活跃且无法恢复，返回404
         if (flvFile == null) {
+            if (!streamService.isStreamActive(streamId)) {
+                log.warn("[FLV-{}] FLV文件不存在且流不活跃，返回404", streamId);
+                response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+                return;
+            }
+            // 流活跃但文件还未创建，再短暂等待
+            for (int i = 0; i < 20; i++) {
+                Path flvPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
+                File f = flvPath.toFile();
+                if (f.exists() && f.length() > 0) {
+                    flvFile = f;
+                    break;
+                }
+                try { Thread.sleep(100); } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+            if (flvFile == null) {
+                log.warn("[FLV-{}] 流活跃但FLV文件创建超时(2秒)，返回404", streamId);
+                response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+                return;
+            }
+        }
+
+        // 文件存在但流不活跃：可能是服务器重启后的残留旧文件，不读取
+        if (!streamService.isStreamActive(streamId)) {
+            log.warn("[FLV-{}] FLV文件存在但流未启动（可能是残留旧文件），返回404", streamId);
             response.setStatus(HttpServletResponse.SC_NOT_FOUND);
-            log.warn("[FLV-{}] FLV文件不存在或为空", streamId);
             return;
         }
 
@@ -95,6 +123,12 @@ public class FlvStreamController {
                 long currentPosition = raf.getFilePointer();
 
                 if (currentPosition >= fileLength) {
+                    // 文件无新数据时，每 1 秒检测一次 FFmpeg 进程是否存活
+                    if (stableCount % 50 == 0 && !streamService.isStreamActive(streamId)) {
+                        log.warn("[FLV-{}] FFmpeg进程已退出但文件未增长，结束传输", streamId);
+                        break;
+                    }
+
                     if (fileLength == lastFileSize) {
                         stableCount++;
                         if (stableCount > stableCountLimit) {
@@ -250,6 +284,20 @@ public class FlvStreamController {
     public void getFlvHead(@PathVariable String streamId, HttpServletResponse response) {
         Path flvPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
         File flvFile = flvPath.toFile();
+
+        // 流不活跃时不返回旧文件信息
+        if (!streamService.isStreamActive(streamId)) {
+            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+            response.setContentType("application/json");
+            response.setCharacterEncoding("UTF-8");
+            response.setHeader("Access-Control-Allow-Origin", "*");
+            try (PrintWriter writer = response.getWriter()) {
+                writer.write("{\"exists\":false,\"reason\":\"stream_not_active\"}");
+            } catch (IOException e) {
+                log.error("[FLV-{}] 获取FLV头信息失败", streamId, e);
+            }
+            return;
+        }
 
         if (!flvFile.exists()) {
             response.setStatus(HttpServletResponse.SC_NOT_FOUND);
