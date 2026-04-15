@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mvn compile:*)",
+      "Bash(/d/work/Maven/apache-maven-3.9.9/bin/mvn.cmd compile:*)"
+    ]
+  }
+}

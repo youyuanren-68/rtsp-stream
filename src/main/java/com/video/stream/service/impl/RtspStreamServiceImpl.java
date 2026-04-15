@@ -822,13 +822,9 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                     }
 
                     try {
-                        // 恢复必要状态（在清理前保存，避免被清理掉）
-                        streamRtspUrls.put(streamId, capturedRtspUrl);
-                        streamType.put(streamId, capturedType);
-
-                        // 先清理残留状态，再启动新流
+                        // 清理残留状态，再启动新流
                         cleanupStreamState(streamId);
-                        // 重新放入必要状态（cleanupStreamState 会移除它们）
+                        // 恢复必要状态（cleanupStreamState 会移除它们）
                         streamRtspUrls.put(streamId, capturedRtspUrl);
                         streamType.put(streamId, capturedType);
 
@@ -849,7 +845,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                             // 重连成功，重置计数器
                             reconnectAttempts.remove(streamId);
                             lastReconnectTime.remove(streamId);
-                            // 旧线程会在退出时自然终止，不主动中断
+                            // 旧线程会自然终止（IOException/超时），不需要中断
                         } else {
                             log.error("[FFmpeg-{}] {}流重连失败", streamId,
                                     capturedType != null ? capturedType.toUpperCase() : "UNKNOWN");
@@ -960,8 +956,8 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             return;
         }
 
+        // 如果 FFmpeg 进程正在运行且未卡死，直接返回
         if (process != null && process.isAlive()) {
-            // 进程还活着，但需要检测是否卡死（文件长时间未写入）
             if (!isStreamStuck(streamId, type)) {
                 return;
             }
@@ -970,7 +966,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             log.warn("[恢复] 流 {} 进程已停止，尝试恢复 (type={})", streamId, type);
         }
 
-        // 停止旧进程并清理
+        // 停止旧进程
         if (process != null && process.isAlive()) {
             process.destroy();
             try {
@@ -1049,13 +1045,22 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         }
 
         File file = new File(outputFile);
+        Long startTime = streamStartTime.get(streamId);
+        if (startTime != null) {
+            long elapsed = System.currentTimeMillis() - startTime;
+            // 流刚启动，给 FFmpeg 足够时间创建文件（最长60秒）
+            if (elapsed < 60000 && !file.exists()) {
+                return false;
+            }
+        }
+
         if (!file.exists()) {
             return true;
         }
 
         long lastModified = file.lastModified();
-        long elapsed = System.currentTimeMillis() - lastModified;
-        return elapsed > 30000;
+        long fileElapsed = System.currentTimeMillis() - lastModified;
+        return fileElapsed > 30000;
     }
     
     private void startFlvFileMonitor(String streamId, String flvPath) {

@@ -59,9 +59,9 @@ public class HlsAccessInterceptor implements HandlerInterceptor {
             // 尝试恢复已停止的流
             streamService.tryRecoverStream(streamId);
 
-            // FFmpeg 恢复后需要时间创建 m3u8 文件，最多等待3秒
+            // FFmpeg 恢复后需要时间创建 m3u8 文件，最多等待5秒
             File m3u8File = new File(hlsOutputPath, streamId + "/index.m3u8");
-            for (int i = 0; i < 30; i++) {
+            for (int i = 0; i < 50; i++) {
                 if (m3u8File.exists() && m3u8File.length() > 0) {
                     return true;
                 }
