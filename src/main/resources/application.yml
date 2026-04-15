@@ -24,7 +24,7 @@ rtsp:
   hls:
     output-path: D:/video/hls
     access-path: /rtspStream/hls
-    segment-time: 1
+    segment-time: 2
     list-size: 10
     cleanup-enabled: true
     cleanup-interval: 120000

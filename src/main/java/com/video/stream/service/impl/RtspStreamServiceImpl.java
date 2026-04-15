@@ -204,6 +204,8 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         ProcessBuilder processBuilder = new ProcessBuilder(
             ffmpegPath,
             "-rtsp_transport", rtspTransport,
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
             "-i", rtspUrl,
             "-c:v", videoCodec,
             "-preset", preset,
@@ -214,8 +216,9 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             "-hls_time", String.valueOf(segmentTime),
             "-hls_list_size", String.valueOf(listSize),
             "-hls_flags", "delete_segments+program_date_time",
+            "-hls_segment_filename", streamDir + "/seg_%05d.ts",
             "-hls_start_number_source", "generic",
-            "-hls_allow_cache", "0",
+            "-hls_allow_cache", "1",
             "-y",
             m3u8Path
         );

@@ -221,10 +221,10 @@
             
             if (Hls.isSupported()) {
                 hls = new Hls({
-                    liveSyncDurationCount: 3,
-                    liveMaxLatencyDurationCount: 7,
+                    liveSyncDurationCount: 5,
+                    liveMaxLatencyDurationCount: 10,
                     enableWorker: true,
-                    lowLatencyMode: true,
+                    lowLatencyMode: false,
                     maxBufferLength: 30,
                     maxMaxBufferLength: 60,
                     startLevel: -1,
@@ -246,15 +246,15 @@
                 });
                 let mediaErrorCount = 0;
                 const maxMediaErrorRecover = 5;
-                
+
                 hls.on(Hls.Events.ERROR, function(event, data) {
                     console.error('HLS错误:', data.type, data.details, data.fatal);
-                    
+
                     if (data.fatal) {
                         switch(data.type) {
                             case Hls.ErrorTypes.NETWORK_ERROR:
                                 showStatus('网络错误，尝试恢复...', 'error');
-                                if (data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR || 
+                                if (data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR ||
                                     data.details === Hls.ErrorDetails.LEVEL_LOAD_ERROR) {
                                     setTimeout(() => {
                                         hls.startLoad();
@@ -266,8 +266,25 @@
                             case Hls.ErrorTypes.MEDIA_ERROR:
                                 mediaErrorCount++;
                                 showStatus(`媒体错误，尝试恢复(${mediaErrorCount}/${maxMediaErrorRecover})...`, 'error');
-                                
-                                if (mediaErrorCount <= maxMediaErrorRecover) {
+
+                                // 对 fragParsingError 使用 manifest 重载而非 recoverMediaError
+                                if (data.details === Hls.ErrorDetails.FRAG_PARSING_ERROR ||
+                                    data.details === Hls.ErrorDetails.FRAG_DECRYPT_ERROR) {
+                                    console.warn('[恢复] 分片解析错误，重新加载 manifest');
+                                    if (mediaErrorCount <= maxMediaErrorRecover) {
+                                        setTimeout(() => {
+                                            hls.stopLoad();
+                                            hls.loadSource(m3u8Url);
+                                        }, 1000);
+                                    } else {
+                                        showStatus('媒体错误恢复次数过多，重新创建播放器...', 'error');
+                                        mediaErrorCount = 0;
+                                        hls.destroy();
+                                        setTimeout(() => {
+                                            playHls(m3u8Url);
+                                        }, 3000);
+                                    }
+                                } else if (mediaErrorCount <= maxMediaErrorRecover) {
                                     setTimeout(() => {
                                         hls.recoverMediaError();
                                     }, 500);
@@ -289,8 +306,9 @@
                                 break;
                         }
                     } else {
-                        if (data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR || 
-                            data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
+                        if (data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR ||
+                            data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR ||
+                            data.details === Hls.ErrorDetails.FRAG_PARSING_ERROR) {
                             console.warn('非致命错误:', data.details);
                         }
                     }
