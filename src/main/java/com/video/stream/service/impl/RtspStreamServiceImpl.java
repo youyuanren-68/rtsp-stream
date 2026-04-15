@@ -478,31 +478,25 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
     }
 
     /**
-     * 清理指定流的所有监控线程
+     * 清理指定流的所有监控线程（仅interrupt，不阻塞等待）
      */
     private void cleanupStreamThreads(String streamId) {
         List<Thread> threads = streamThreads.remove(streamId);
         if (threads != null && !threads.isEmpty()) {
             Thread currentThread = Thread.currentThread();
-            log.info("[线程清理] 停止流 {} 的 {} 个监控线程", streamId, threads.size());
+            int count = 0;
             for (Thread thread : threads) {
                 // 不中断当前线程自身，避免后续逻辑受中断影响
                 if (thread.isAlive() && thread != currentThread) {
                     thread.interrupt();
+                    count++;
                 }
             }
-            // 短暂等待线程结束
-            for (Thread thread : threads) {
-                if (thread == currentThread) {
-                    continue;
-                }
-                try {
-                    thread.join(2000);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    log.warn("[线程清理] 等待线程结束被中断: {}", thread.getName());
-                }
+            if (count > 0) {
+                log.info("[线程清理] 已发送中断信号给流 {} 的 {} 个监控线程", streamId, count);
             }
+            // 不再使用 thread.join 阻塞等待，让线程自然退出
+            // 避免因 FFmpeg 进程卡住导致请求线程长时间阻塞
         }
     }
 
