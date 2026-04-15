@@ -497,9 +497,9 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
     }
 
     /**
-     * 彻底终止 FFmpeg 进程及其所有子进程。
-     * 在启动 FFmpeg 时记录 PID，清理时直接用 taskkill /F /T /PID 终止进程树。
-     * Java 8 兼容：通过 tasklist 命令匹配启动时间获取 PID。
+     * 彻底终止 FFmpeg 进程。
+     * 先优雅 destroy()，等 2 秒；未退出则强制 destroyForcibly()。
+     * Windows 上再补充 taskkill /F /T 确保子进程被清理。
      */
     private void killProcessTree(Process process, String streamId) {
         if (process == null || !process.isAlive()) {
@@ -509,7 +509,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         // 第一步：优雅终止
         process.destroy();
         try {
-            if (process.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
+            if (process.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)) {
                 log.info("[进程清理] FFmpeg 进程已正常退出: streamId={}", streamId);
                 return;
             }
@@ -517,89 +517,34 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             Thread.currentThread().interrupt();
         }
 
-        // 第二步：尝试通过 taskkill 终止进程树
+        // 第二步：强制终止
+        process.destroyForcibly();
         try {
-            String os = System.getProperty("os.name").toLowerCase();
-            if (os.contains("win")) {
-                // 获取 PID 后强制终止进程树
-                Long pid = findFfmpegPid(streamId);
-                if (pid != null && pid > 0) {
-                    ProcessBuilder killer = new ProcessBuilder(
-                        "taskkill", "/F", "/T", "/PID", String.valueOf(pid));
-                    killer.redirectErrorStream(true);
-                    Process killProc = killer.start();
-                    killProc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS);
-                    log.info("[进程清理] 已强制终止 FFmpeg 进程树: streamId={}, pid={}", streamId, pid);
-                } else {
-                    log.warn("[进程清理] 未找到 FFmpeg PID，回退到 destroyForcibly: streamId={}", streamId);
-                    process.destroyForcibly();
-                }
-            } else {
-                // Linux/Mac: kill 进程组
-                long pid = -1;
-                try {
-                    java.lang.reflect.Field pidField = process.getClass().getDeclaredField("pid");
-                    pidField.setAccessible(true);
-                    pid = pidField.getLong(process);
-                } catch (Exception e) {
-                    // ignore
-                }
-                if (pid > 0) {
-                    ProcessBuilder killer = new ProcessBuilder("kill", "-9", "-" + pid);
-                    killer.redirectErrorStream(true);
-                    Process killProc = killer.start();
-                    killProc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS);
-                    log.info("[进程清理] 已强制终止 FFmpeg 进程组: streamId={}, pid={}", streamId, pid);
-                } else {
-                    process.destroyForcibly();
-                }
-            }
-        } catch (Exception e) {
-            log.warn("[进程清理] 强制终止失败，回退到 destroyForcibly: streamId={}, error={}",
-                    streamId, e.getMessage());
-            process.destroyForcibly();
-        }
-
-        // 最终确认
-        try {
-            if (!process.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)) {
-                process.destroyForcibly();
-                log.warn("[进程清理] FFmpeg 进程树终止失败，已尝试 destroyForcibly: streamId={}", streamId);
+            if (process.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)) {
+                log.info("[进程清理] FFmpeg 进程已强制退出: streamId={}", streamId);
+                return;
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-    }
 
-    /**
-     * 通过 tasklist 命令查找指定 streamId 的 FFmpeg 进程 PID。
-     * 在 startStream/startFlvStream 时将 streamId 写入 FFmpeg 的 -metadata 参数，
-     * 这样可以通过 tasklist 的命令行信息匹配到正确的 PID。
-     */
-    private Long findFfmpegPid(String streamId) {
+        // 第三步：Windows 上使用 taskkill 确保进程树被清理
         try {
-            ProcessBuilder tasklist = new ProcessBuilder(
-                "tasklist", "/FI", "IMAGENAME eq ffmpeg.exe", "/FO", "CSV", "/NH");
-            tasklist.redirectErrorStream(true);
-            Process proc = tasklist.start();
-            java.io.BufferedReader reader = new java.io.BufferedReader(
-                new java.io.InputStreamReader(proc.getInputStream()));
-            String line;
-            while ((line = reader.readLine()) != null) {
-                // CSV 格式: "ffmpeg.exe","12345","Console","1","10,000 K"
-                if (line.contains(streamId)) {
-                    String[] parts = line.split(",");
-                    if (parts.length >= 2) {
-                        String pidStr = parts[1].replace("\"", "").trim();
-                        return Long.parseLong(pidStr);
-                    }
+            String os = System.getProperty("os.name").toLowerCase();
+            if (os.contains("win")) {
+                ProcessBuilder killer = new ProcessBuilder(
+                    "cmd", "/c", "taskkill /F /IM ffmpeg.exe /T >nul 2>&1");
+                killer.redirectErrorStream(true);
+                Process killProc = killer.start();
+                // 限制等待时间，避免 cmd 卡住
+                if (!killProc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
+                    killProc.destroyForcibly();
                 }
+                log.info("[进程清理] 已执行 taskkill 清理 ffmpeg 进程树: streamId={}", streamId);
             }
-            proc.waitFor(3, java.util.concurrent.TimeUnit.SECONDS);
         } catch (Exception e) {
-            log.debug("[进程清理] 查找FFmpeg PID失败: {}", e.getMessage());
+            log.warn("[进程清理] taskkill 执行失败: streamId={}, error={}", streamId, e.getMessage());
         }
-        return null;
     }
 
     /**
