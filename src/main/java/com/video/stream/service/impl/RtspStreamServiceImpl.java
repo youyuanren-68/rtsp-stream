@@ -342,6 +342,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             "-fflags", "nobuffer+genpts",
             "-flags", "low_delay",
             "-rtsp_transport", rtspTransport,
+            "-timeout", "30000000",
             "-i", rtspUrl,
             "-c:v", videoCodec,
             "-preset", preset,
@@ -350,6 +351,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             "-ar", String.valueOf(audioSampleRate),
             "-f", "flv",
             "-flvflags", "no_duration_filesize",
+            "-y",
             flvOutput
         );
         
@@ -926,13 +928,31 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         return 0;
     }
 
+    private final Map<String, Object> streamRecoveryLocks = new ConcurrentHashMap<>();
+
     @Override
-    public synchronized void tryRecoverStream(String streamId) {
+    public void tryRecoverStream(String streamId) {
+        // per-stream 锁，避免不同流的恢复互相阻塞
+        Object lock = streamRecoveryLocks.computeIfAbsent(streamId, k -> new Object());
+        synchronized (lock) {
+            doRecoverStream(streamId);
+        }
+        streamRecoveryLocks.remove(streamId);
+    }
+
+    private void doRecoverStream(String streamId) {
         String rtspUrl = streamRtspUrls.get(streamId);
         String type = streamType.get(streamId);
         Process process = activeProcesses.get(streamId);
 
         if (rtspUrl == null) {
+            log.warn("[恢复] 流 {} 缺少RTSP地址，无法恢复", streamId);
+            return;
+        }
+
+        if (type == null) {
+            // 元数据丢失，无法恢复
+            log.warn("[恢复] 流 {} 元数据丢失(type=null)，无法恢复", streamId);
             return;
         }
 
@@ -952,7 +972,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             try {
                 if (!process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
                     process.destroyForcibly();
-                    Thread.sleep(500); // 等待进程完全退出
+                    Thread.sleep(500);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -962,7 +982,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         // 清理旧监控线程
         cleanupStreamThreads(streamId);
 
-        // 清理状态（不删除streamRtspUrls、streamType、streamLastAccessTime）
+        // 清理状态（保留streamRtspUrls、streamType、streamLastAccessTime）
         activeProcesses.remove(streamId);
         streamStatus.remove(streamId);
         streamStartTime.remove(streamId);
@@ -981,6 +1001,11 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                 File newFlvFile = new File(streamDir, newName);
                 if (oldFlvFile.renameTo(newFlvFile)) {
                     log.info("[恢复] 旧FLV文件已重命名: {}", newName);
+                } else {
+                    // rename失败，直接删除旧文件
+                    if (oldFlvFile.delete()) {
+                        log.info("[恢复] 旧FLV文件已删除: {}", oldFlvFile.getAbsolutePath());
+                    }
                 }
             }
         } else if ("hls".equals(type)) {
@@ -1005,7 +1030,8 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                 log.error("[恢复] 未知流类型: {}", streamId);
                 return;
             }
-            log.info("[恢复] startFlvStream/startStream 返回结果: streamId={}, success={}", streamId, success);
+            log.info("[恢复] startFlvStream/startStream 返回结果: streamId={}, success={}, processAlive={}",
+                    streamId, success, isStreamActive(streamId));
 
             if (success) {
                 log.info("[恢复] 流 {} 恢复成功", streamId);
