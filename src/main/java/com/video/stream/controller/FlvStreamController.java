@@ -84,8 +84,9 @@ public class FlvStreamController {
             int stableCountLimit = 18000;
             long totalBytesSent = 0;
 
-            // 文件切换阈值：当 FFmpeg 仍在运行但文件不增长超过此次数时，尝试切换到新文件
+            // 文件切换/恢复检测：当文件不增长时触发
             int fileSwitchThreshold = 300; // 300 * 20ms = 6秒
+            long lastRecoveryCheck = 0;
 
             log.info("[FLV-{}] 开始流式传输: {}", streamId, flvFile.getAbsolutePath());
 
@@ -108,6 +109,32 @@ public class FlvStreamController {
                                     streamId, stableCountLimit / 10,
                                     fileLength / (1024 * 1024), totalBytesSent / (1024 * 1024));
                             break;
+                        }
+
+                        // 检测到 FFmpeg 可能已死亡：6秒未写入且进程不活跃，触发恢复
+                        if (stableCount == 50 && System.currentTimeMillis() - lastRecoveryCheck > 10000) {
+                            lastRecoveryCheck = System.currentTimeMillis();
+                            boolean active = streamService.isStreamActive(streamId);
+                            if (!active) {
+                                log.warn("[FLV-{}] 检测到FFmpeg进程死亡，触发恢复", streamId);
+                                streamService.tryRecoverStream(streamId);
+                                // 等待新FFmpeg进程创建文件
+                                stableCount = 0;
+                                // 尝试切换到新文件
+                                Path newFlvPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
+                                File newFlvFile = newFlvPath.toFile();
+                                if (newFlvFile.exists() && !newFlvFile.getAbsolutePath().equals(flvFile.getAbsolutePath())) {
+                                    try { raf.close(); } catch (IOException ignored) {}
+                                    raf = new RandomAccessFile(newFlvFile, "r");
+                                    flvFile = newFlvFile;
+                                    lastFileSize = 0;
+                                    log.info("[FLV-{}] 恢复后切换到新FLV文件: {}", streamId, newFlvFile.getAbsolutePath());
+                                } else {
+                                    // 新文件尚未创建，等待恢复
+                                    log.info("[FLV-{}] 已触发恢复，等待新FLV文件创建...", streamId);
+                                }
+                                continue;
+                            }
                         }
 
                         // 检测到 FFmpeg 可能已重启（文件被重命名），尝试切换到新文件
