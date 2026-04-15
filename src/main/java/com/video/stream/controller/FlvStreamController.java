@@ -111,46 +111,73 @@ public class FlvStreamController {
                             break;
                         }
 
-                        // 检测到 FFmpeg 可能已死亡：6秒未写入且进程不活跃，触发恢复
+                        // 检测到 FFmpeg 可能已死亡：文件 1 秒未增长且进程不活跃，触发恢复
                         if (stableCount == 50 && System.currentTimeMillis() - lastRecoveryCheck > 10000) {
                             lastRecoveryCheck = System.currentTimeMillis();
                             boolean active = streamService.isStreamActive(streamId);
                             if (!active) {
                                 log.warn("[FLV-{}] 检测到FFmpeg进程死亡，触发恢复", streamId);
                                 streamService.tryRecoverStream(streamId);
-                                // 等待新FFmpeg进程创建文件
+
+                                // 关闭旧文件（已被tryRecoverStream重命名）
+                                try { raf.close(); } catch (IOException ignored) {}
+                                raf = null;
                                 stableCount = 0;
-                                // 尝试切换到新文件
-                                Path newFlvPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
-                                File newFlvFile = newFlvPath.toFile();
-                                if (newFlvFile.exists() && !newFlvFile.getAbsolutePath().equals(flvFile.getAbsolutePath())) {
-                                    try { raf.close(); } catch (IOException ignored) {}
-                                    raf = new RandomAccessFile(newFlvFile, "r");
-                                    flvFile = newFlvFile;
-                                    lastFileSize = 0;
-                                    log.info("[FLV-{}] 恢复后切换到新FLV文件: {}", streamId, newFlvFile.getAbsolutePath());
-                                } else {
-                                    // 新文件尚未创建，等待恢复
-                                    log.info("[FLV-{}] 已触发恢复，等待新FLV文件创建...", streamId);
+
+                                // 等待新FFmpeg创建live.flv，最多5秒
+                                Path expectedPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
+                                for (int wait = 0; wait < 50; wait++) {
+                                    File expectedFile = expectedPath.toFile();
+                                    if (expectedFile.exists() && expectedFile.length() > 0) {
+                                        try {
+                                            raf = new RandomAccessFile(expectedFile, "r");
+                                            flvFile = expectedFile;
+                                            log.info("[FLV-{}] 恢复后切换到新FLV文件: {}", streamId, expectedFile.getAbsolutePath());
+                                        } catch (IOException e) {
+                                            log.error("[FLV-{}] 打开新FLV文件失败: {}", streamId, e.getMessage());
+                                            return;
+                                        }
+                                        lastFileSize = 0;
+                                        noDataCount = 0;
+                                        break;
+                                    }
+                                    try { Thread.sleep(100); } catch (InterruptedException e) {
+                                        Thread.currentThread().interrupt();
+                                        return;
+                                    }
+                                }
+
+                                if (raf == null) {
+                                    log.warn("[FLV-{}] 恢复后新FLV文件仍未创建（等待5秒超时），结束传输", streamId);
+                                    return;
                                 }
                                 continue;
                             }
                         }
 
-                        // 检测到 FFmpeg 可能已重启（文件被重命名），尝试切换到新文件
+                        // 检测到 FFmpeg 可能已重启（文件大小不匹配，说明文件被重命名后重建）
                         if (stableCount == fileSwitchThreshold && streamService.isStreamActive(streamId)) {
-                            Path newFlvPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
-                            File newFlvFile = newFlvPath.toFile();
-                            if (newFlvFile.exists() && !newFlvFile.getAbsolutePath().equals(flvFile.getAbsolutePath())) {
-                                log.info("[FLV-{}] 检测到新FLV文件，切换读取: {} (旧文件: {}MB, 新文件: {}MB)",
-                                        streamId, newFlvFile.getAbsolutePath(),
-                                        fileLength / (1024 * 1024), newFlvFile.length() / (1024 * 1024));
-                                try { raf.close(); } catch (IOException ignored) {}
-                                raf = new RandomAccessFile(newFlvFile, "r");
-                                flvFile = newFlvFile;
-                                stableCount = 0;
-                                lastFileSize = 0;
-                                continue;
+                            Path expectedPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
+                            File expectedFile = expectedPath.toFile();
+                            if (expectedFile.exists()) {
+                                long expectedSize = expectedFile.length();
+                                long currentSize = raf.length();
+                                if (expectedSize != currentSize) {
+                                    log.info("[FLV-{}] 检测到FFmpeg重启，切换读取新FLV文件: {} (旧: {}MB, 新: {}MB)",
+                                            streamId, expectedFile.getAbsolutePath(),
+                                            currentSize / (1024 * 1024), expectedSize / (1024 * 1024));
+                                    try { raf.close(); } catch (IOException ignored) {}
+                                    try {
+                                        raf = new RandomAccessFile(expectedFile, "r");
+                                        flvFile = expectedFile;
+                                    } catch (IOException e) {
+                                        log.error("[FLV-{}] 打开新FLV文件失败: {}", streamId, e.getMessage());
+                                        return;
+                                    }
+                                    stableCount = 0;
+                                    lastFileSize = 0;
+                                    continue;
+                                }
                             }
                         }
                     } else {

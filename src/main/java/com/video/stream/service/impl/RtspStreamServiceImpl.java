@@ -451,18 +451,21 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
     
     /**
      * 统一清理指定 streamId 的所有状态
+     * 注意：不清理 streamRtspUrls、streamType 和 streamLastAccessTime，
+     * 保留用于后续自动恢复和观众判断
      */
     private void cleanupStreamState(String streamId) {
         activeProcesses.remove(streamId);
         streamStatus.remove(streamId);
         streamStartTime.remove(streamId);
-        streamType.remove(streamId);
         hlsFileReady.remove(streamId);
         flvFileReady.remove(streamId);
-        streamRtspUrls.remove(streamId);
-        streamLastAccessTime.remove(streamId);
         reconnectAttempts.remove(streamId);
         lastReconnectTime.remove(streamId);
+        // 保留 streamType、streamRtspUrls 和 streamLastAccessTime
+        // - streamType/streamRtspUrls: 恢复时识别流类型和RTSP地址
+        // - streamLastAccessTime: 健康检查判断是否有最近观众
+        // 下次 startStream/startFlvStream 会自动覆盖这些值
     }
 
     /**
@@ -547,7 +550,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
     @Scheduled(fixedDelay = 60000, initialDelay = 60000)
     public void checkHlsStreamHealth() {
         try {
-            // 遍历当前活跃流（需要复制快照避免 ConcurrentModificationException）
+            // 1. 遍历当前活跃流（需要复制快照避免 ConcurrentModificationException）
             List<String> streamIds = new ArrayList<>(activeProcesses.keySet());
             for (String streamId : streamIds) {
                 Process process = activeProcesses.get(streamId);
@@ -563,13 +566,11 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                     String rtspUrl = streamRtspUrls.get(streamId);
                     if (rtspUrl != null) {
                         log.warn("[健康检查] HLS流 {} 已停止，清理状态后重启...", streamId);
-                        // 清理残留状态（不中断线程，旧线程会自然终止）
                         cleanupStreamState(streamId);
                         streamThreads.remove(streamId);
 
                         try {
                             if (startStream(rtspUrl, streamId)) {
-                                // 健康检查成功重启，重置重连计数器
                                 reconnectAttempts.remove(streamId);
                                 log.info("[健康检查] HLS流 {} 重启成功", streamId);
                             } else {
@@ -581,6 +582,32 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                     } else {
                         log.warn("[健康检查] HLS流 {} 缺少RTSP地址，停止并清理", streamId);
                         stopStream(streamId);
+                    }
+                }
+            }
+
+            // 2. 扫描已停止但有元数据的HLS流（进程监控器可能已将其从activeProcesses移除）
+            for (String streamId : new ArrayList<>(streamType.keySet())) {
+                if (!"hls".equals(streamType.get(streamId))) continue;
+                if (activeProcesses.containsKey(streamId)) continue; // 已在上面处理
+
+                // 有HLS元数据但进程不活跃，检查是否有最近访问
+                if (hasRecentViewer(streamId)) {
+                    String rtspUrl = streamRtspUrls.get(streamId);
+                    if (rtspUrl != null) {
+                        log.warn("[健康检查] HLS流 {} 进程已移除但有观众，尝试恢复", streamId);
+                        try {
+                            cleanupStreamThreads(streamId);
+                            cleanupStreamState(streamId);
+                            if (startStream(rtspUrl, streamId)) {
+                                reconnectAttempts.remove(streamId);
+                                log.info("[健康检查] HLS流 {} 恢复成功", streamId);
+                            } else {
+                                log.error("[健康检查] HLS流 {} 恢复失败", streamId);
+                            }
+                        } catch (Exception e) {
+                            log.error("[健康检查] 恢复HLS流 {} 失败: {}", streamId, e.getMessage(), e);
+                        }
                     }
                 }
             }
@@ -666,6 +693,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
     @Scheduled(fixedDelay = 60000, initialDelay = 60000)
     public void checkFlvStreamHealth() {
         try {
+            // 1. 遍历当前活跃流
             List<String> streamIds = new ArrayList<>(activeProcesses.keySet());
             for (String streamId : streamIds) {
                 Process process = activeProcesses.get(streamId);
@@ -696,6 +724,31 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                     } else {
                         log.warn("[健康检查] FLV流 {} 缺少RTSP地址，停止并清理", streamId);
                         stopStream(streamId);
+                    }
+                }
+            }
+
+            // 2. 扫描已停止但有元数据的FLV流
+            for (String streamId : new ArrayList<>(streamType.keySet())) {
+                if (!"flv".equals(streamType.get(streamId))) continue;
+                if (activeProcesses.containsKey(streamId)) continue;
+
+                if (hasRecentViewer(streamId)) {
+                    String rtspUrl = streamRtspUrls.get(streamId);
+                    if (rtspUrl != null) {
+                        log.warn("[健康检查] FLV流 {} 进程已移除但有观众，尝试恢复", streamId);
+                        try {
+                            cleanupStreamThreads(streamId);
+                            cleanupStreamState(streamId);
+                            if (startFlvStream(rtspUrl, streamId)) {
+                                reconnectAttempts.remove(streamId);
+                                log.info("[健康检查] FLV流 {} 恢复成功", streamId);
+                            } else {
+                                log.error("[健康检查] FLV流 {} 恢复失败", streamId);
+                            }
+                        } catch (Exception e) {
+                            log.error("[健康检查] 恢复FLV流 {} 失败: {}", streamId, e.getMessage(), e);
+                        }
                     }
                 }
             }
