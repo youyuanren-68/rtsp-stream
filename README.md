@@ -5,9 +5,9 @@
 ## ✨ 特性
 
 - 🎥 **双协议支持** - 同时支持HLS和FLV两种输出格式
-- 🔄 **自动重连** - FFmpeg进程异常退出时自动重启，确保服务高可用
-- 🧹 **智能清理** - 自动清理过期文件，防止磁盘空间占用过大
-- ⏱️ **自动停止** - 无客户端访问时自动停止FFmpeg进程，节省资源
+- 🔄 **自动恢复** - FFmpeg进程异常退出时，通过拦截器和健康检查自动重启
+- 🧹 **智能清理** - 自动清理过期文件，防止磁盘空间占用过多
+- ⏱️ **自动停止** - 无客户端访问30分钟后自动停止FFmpeg进程，节省资源
 - 📊 **实时监控** - 提供流状态查询和健康检查接口
 - 🎬 **首帧优化** - 优化HLS首帧延迟，FLV支持流式传输
 - 🔒 **安全防护** - 防止路径遍历攻击，输入验证
@@ -15,7 +15,7 @@
 ## 🛠️ 技术栈
 
 - **后端框架**: Spring Boot 2.1.1
-- **视频处理**: FFmpeg 8.1
+- **视频处理**: FFmpeg 4.0+
 - **HLS播放**: HLS.js
 - **FLV播放**: flv.js
 - **构建工具**: Maven
@@ -34,7 +34,7 @@
 ```bash
 # 下载FFmpeg
 # 访问 https://ffmpeg.org/download.html 下载Windows版本
-# 解压到指定目录，例如: D:\AI\ffmpeg-8.1-essentials_build\
+# 解压到指定目录，例如: D:\AI\ffmpeg-8.1\
 ```
 
 **Linux:**
@@ -201,25 +201,27 @@ rtsp:
   hls:
     output-path: D:/video/hls          # HLS输出目录
     access-path: /rtspStream/hls       # HLS访问路径
-    segment-time: 1                    # 分片时长（秒）
-    list-size: 3                       # 播放列表大小
+    segment-time: 2                    # 分片时长（秒）
+    list-size: 10                      # 播放列表大小
     cleanup-enabled: true              # 启用清理
-    cleanup-interval: 3600             # 清理间隔（秒）
-  
+    cleanup-interval: 120000           # 清理间隔（毫秒）
+
   flv:
     output-path: D:/video/flv          # FLV输出目录
     access-path: /rtspStream/flv       # FLV访问路径
     cleanup-enabled: true              # 启用清理
-    cleanup-interval: 3600             # 清理间隔（秒）
+    cleanup-interval: 120000           # 清理间隔（毫秒）
     max-file-size-mb: 500              # 单个FLV文件最大MB
     max-file-age-hours: 24             # 文件保留小时数
-  
+
   stream:
     auto-stop-enabled: true            # 启用自动停止
-    auto-stop-timeout: 300000          # 无访问超时时间（毫秒）
-  
+    auto-stop-timeout: 1800000         # 无访问超时（毫秒，30分钟）
+    max-concurrent-streams: 50         # 最大并发流数量
+    max-reconnect-attempts: 10         # 最大重连次数
+
   ffmpeg:
-    path: D:\\AI\\ffmpeg\\bin\\ffmpeg.exe  # FFmpeg路径
+    path: D:\AI\ffmpeg-8.1\bin\ffmpeg.exe  # FFmpeg路径
     preset: ultrafast                  # 编码预设
     tune: zerolatency                  # 调优选项
     video-codec: libx264               # 视频编码
@@ -234,13 +236,14 @@ rtsp:
 |--------|------|--------|
 | `rtsp.hls.output-path` | HLS输出目录 | D:/video/hls |
 | `rtsp.hls.access-path` | HLS访问路径 | /rtspStream/hls |
-| `rtsp.hls.segment-time` | HLS分片时长（秒） | 1 |
-| `rtsp.hls.list-size` | HLS播放列表大小 | 3 |
+| `rtsp.hls.segment-time` | HLS分片时长（秒） | 2 |
+| `rtsp.hls.list-size` | HLS播放列表大小 | 10 |
 | `rtsp.flv.output-path` | FLV输出目录 | D:/video/flv |
 | `rtsp.flv.access-path` | FLV访问路径 | /rtspStream/flv |
 | `rtsp.flv.max-file-size-mb` | FLV文件最大MB | 500 |
 | `rtsp.stream.auto-stop-enabled` | 启用自动停止 | true |
-| `rtsp.stream.auto-stop-timeout` | 自动停止超时（毫秒） | 300000 |
+| `rtsp.stream.auto-stop-timeout` | 自动停止超时（毫秒） | 1800000 (30分钟) |
+| `rtsp.stream.max-concurrent-streams` | 最大并发流数量 | 50 |
 | `rtsp.ffmpeg.path` | FFmpeg路径 | - |
 | `rtsp.ffmpeg.preset` | 编码预设 | ultrafast |
 | `rtsp.ffmpeg.tune` | 调优选项 | zerolatency |
@@ -252,6 +255,7 @@ rtsp-stream/
 ├── src/main/java/com/video/stream/
 │   ├── config/
 │   │   ├── FilterConfig.java              # Filter配置
+│   │   ├── HlsAccessInterceptor.java      # HLS拦截器
 │   │   └── RtspHlsResourceConfig.java     # 资源映射配置
 │   ├── controller/
 │   │   ├── FlvStreamController.java       # FLV流式传输
@@ -277,26 +281,27 @@ rtsp-stream/
 
 ## 🔧 高级功能
 
-### 自动重连机制
+### 自动恢复机制
 
-系统内置了完整的自动重连机制：
+系统内置了三层恢复机制，确保流媒体服务高可用：
 
-1. **进程异常退出重连** - FFmpeg进程异常退出时，3秒后自动重启
-2. **定时健康检查** - 每分钟检查所有流的健康状态
-3. **前端自动重连** - 播放器检测到错误时自动重连
+1. **拦截器即时恢复** - 每次HLS/FLV请求时检查FFmpeg进程状态，发现进程死亡立即恢复（低延迟）
+2. **定时健康检查** - 每60秒扫描一次所有流，发现异常自动重启（兜底保障）
+3. **前端自动重连** - 播放器检测到错误时自动重新加载流
 
 ### 智能资源管理
 
-- **文件大小限制** - FLV文件超过500MB自动重启进程
-- **定时清理** - 每小时清理已停止的流目录
-- **自动停止** - 5分钟无访问自动停止FFmpeg进程
+- **文件大小限制** - FLV文件超过500MB自动重启FFmpeg进程并重建文件
+- **定时清理** - 每2小时清理已停止的流目录，释放磁盘空间
+- **自动停止** - 30分钟无访问自动停止FFmpeg进程，节省CPU和内存
 
 ### 流式传输
 
 FLV使用`RandomAccessFile`实现流式传输，支持：
-- 实时读取正在写入的文件
+- 实时读取FFmpeg正在写入的文件
 - 自动跟踪文件增长
-- 智能等待新数据
+- 智能等待新数据（最长720秒）
+- 自动检测FFmpeg重启并切换文件
 
 ## 🐛 常见问题
 
@@ -310,15 +315,15 @@ FLV使用`RandomAccessFile`实现流式传输，支持：
 
 **原因**: HLS需要等待FFmpeg生成第一个分片文件
 
-**解决**: 
+**解决**:
 - 减少`segment-time`配置（但会增加服务器压力）
 - 使用FLV格式（首帧通常1-2秒）
 
-### 3. FLV播放一会就暂停
+### 3. FLV播放中断
 
-**原因**: 旧版本使用静态资源处理器，不支持读取正在写入的文件
+**原因**: FFmpeg进程因网络问题退出
 
-**解决**: 已优化为使用`FlvStreamController`进行流式传输
+**解决**: 系统会自动检测并恢复，无需手动干预
 
 ### 4. 权限问题
 

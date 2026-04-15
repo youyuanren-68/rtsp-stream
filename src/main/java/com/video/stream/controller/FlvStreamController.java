@@ -54,7 +54,7 @@ public class FlvStreamController {
 
         if (flvFile == null) {
             response.setStatus(HttpServletResponse.SC_NOT_FOUND);
-            log.warn("FLV文件不存在或为空: streamId={}", streamId);
+            log.warn("[FLV-{}] FLV文件不存在或为空", streamId);
             return;
         }
 
@@ -101,11 +101,11 @@ public class FlvStreamController {
                             // FFmpeg 还在运行时，给予更多容忍时间
                             boolean active = streamService.isStreamActive(streamId);
                             if (active) {
-                                log.warn("[FLV-{}] FFmpeg进程运行中但文件{}秒未增长，继续等待", streamId, stableCountLimit / 10);
+                                log.warn("[FLV-{}] FFmpeg进程运行中但文件 {} 秒未增长，继续等待", streamId, stableCountLimit / 10);
                                 Thread.sleep(500);
                                 continue;
                             }
-                            log.warn("[FLV-{}] FFmpeg已停止写入超过{}秒，文件大小: {}MB, 已发送: {}MB",
+                            log.warn("[FLV-{}] FFmpeg已停止写入超过 {} 秒，文件大小: {}MB, 已发送: {}MB",
                                     streamId, stableCountLimit / 10,
                                     fileLength / (1024 * 1024), totalBytesSent / (1024 * 1024));
                             break;
@@ -263,7 +263,7 @@ public class FlvStreamController {
         try (PrintWriter writer = response.getWriter()) {
             writer.write("{\"exists\":true,\"size\":" + flvFile.length() + ",\"lastModified\":" + flvFile.lastModified() + "}");
         } catch (IOException e) {
-            log.error("获取FLV头信息失败", e);
+            log.error("[FLV-{}] 获取FLV头信息失败", streamId, e);
         }
     }
 }

@@ -107,13 +107,13 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             outputDir.mkdirs();
             log.info("创建HLS输出目录: {}", hlsOutputPath);
         }
-        
+
         File flvDir = new File(flvOutputPath);
         if (!flvDir.exists()) {
             flvDir.mkdirs();
             log.info("创建FLV输出目录: {}", flvOutputPath);
         }
-        
+
         File ffmpegFile = new File(ffmpegPath);
         if (!ffmpegFile.exists()) {
             log.warn("FFmpeg可执行文件不存在: {}，请检查配置", ffmpegPath);
@@ -156,10 +156,10 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         if (activeProcesses.containsKey(streamId)) {
             Process existingProcess = activeProcesses.get(streamId);
             if (existingProcess != null && existingProcess.isAlive()) {
-                log.warn("流 {} 已存在且正在运行，返回现有流信息", streamId);
+                log.warn("[HLS-{}] 流已存在且正在运行，返回现有流信息", streamId);
                 return true;
             } else {
-                log.warn("流 {} 已存在但未运行，清理旧状态", streamId);
+                log.warn("[HLS-{}] 流已存在但未运行，清理旧状态", streamId);
                 stopStream(streamId);
             }
         }
@@ -167,7 +167,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         // 检查最大并发流数量
         long activeCount = activeProcesses.values().stream().filter(p -> p != null && p.isAlive()).count();
         if (activeCount >= maxConcurrentStreams) {
-            log.error("已达到最大并发流数量限制: {}, 当前活跃流: {}", maxConcurrentStreams, activeCount);
+            log.error("[HLS-{}] 已达到最大并发流数量限制: {}, 当前活跃流: {}", streamId, maxConcurrentStreams, activeCount);
             streamStatus.put(streamId, "error: 超过最大并发流数量");
             return false;
         }
@@ -175,26 +175,26 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         String streamDir = hlsOutputPath + "/" + streamId;
         Path streamPath = Paths.get(streamDir).normalize();
         Path basePath = Paths.get(hlsOutputPath).normalize();
-        
+
         if (!streamPath.startsWith(basePath)) {
-            log.error("检测到路径遍历攻击尝试: streamId={}, streamDir={}", streamId, streamDir);
+            log.error("[HLS-{}] 检测到路径遍历攻击尝试: streamDir={}", streamId, streamDir);
             streamStatus.put(streamId, "error: 非法路径");
             return false;
         }
-        
+
         File dir = new File(streamDir);
         if (!dir.exists()) {
             boolean created = dir.mkdirs();
             if (!created) {
-                log.error("创建流目录失败: streamId={}, dir={}", streamId, streamDir);
+                log.error("[HLS-{}] 创建流目录失败: dir={}", streamId, streamDir);
                 streamStatus.put(streamId, "error: 创建输出目录失败");
                 return false;
             }
-            log.info("已创建流目录: {}", streamDir);
+            log.info("[HLS-{}] 已创建流目录: {}", streamId, streamDir);
         }
-        
+
         if (!dir.canWrite()) {
-            log.error("流目录没有写入权限: streamId={}, dir={}", streamId, streamDir);
+            log.error("[HLS-{}] 流目录没有写入权限: dir={}", streamId, streamDir);
             streamStatus.put(streamId, "error: 输出目录没有写入权限");
             return false;
         }
@@ -239,16 +239,16 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             startProcessMonitor(streamId, process);
             startHlsFileMonitor(streamId, m3u8Path);
             
-            log.info("RTSP转HLS流已启动: streamId={}, rtspUrl={}, output={}", streamId, rtspUrl, m3u8Path);
+            log.info("[HLS-{}] RTSP转HLS流已启动: rtspUrl={}, output={}", streamId, rtspUrl, m3u8Path);
             return true;
             
         } catch (IOException e) {
-            log.error("启动FFmpeg失败: streamId={}, error={}", streamId, e.getMessage(), e);
+            log.error("[HLS-{}] 启动FFmpeg失败: error={}", streamId, e.getMessage(), e);
             cleanupStreamState(streamId);
             return false;
         }
     }
-    
+
     @Override
     public boolean startFlvStream(String rtspUrl, String streamId) throws IOException {
         if (rtspUrl == null || rtspUrl.isEmpty()) {
@@ -286,14 +286,14 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             
             if (existingProcess != null && existingProcess.isAlive()) {
                 if ("flv".equals(existingType)) {
-                    log.warn("FLV流 {} 已存在且正在运行，返回现有流信息", streamId);
+            log.info("[FLV-{}] FLV流已存在且正在运行，返回现有流信息", streamId);
                     return true;
                 } else {
-                    log.warn("流 {} 已存在但类型为{}，需要先停止", streamId, existingType);
+                    log.warn("[FLV-{}] 流已存在但类型为{}，需要先停止", streamId, existingType);
                     stopStream(streamId);
                 }
             } else {
-                log.warn("FLV流 {} 已存在但未运行，清理旧状态", streamId);
+                log.warn("[FLV-{}] 流已存在但未运行，清理旧状态", streamId);
                 stopStream(streamId);
             }
         }
@@ -335,8 +335,8 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         
         String flvOutput = streamDir + "/live.flv";
         
-        log.info("[FFmpeg-{}] 准备启动FLV转码，命令参数: rtspUrl={}, output={}", streamId, rtspUrl, flvOutput);
-        
+        log.info("[FLV-{}] 准备启动FLV转码: rtspUrl={}, output={}", streamId, rtspUrl, flvOutput);
+
         ProcessBuilder processBuilder = new ProcessBuilder(
             ffmpegPath,
             "-fflags", "nobuffer+genpts",
@@ -371,11 +371,11 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             startProcessMonitor(streamId, process);
             startFlvFileMonitor(streamId, flvOutput);
             
-            log.info("RTSP转FLV流已启动: streamId={}, rtspUrl={}, output={}", streamId, rtspUrl, flvOutput);
+            log.info("[FLV-{}] RTSP转FLV流已启动: rtspUrl={}, output={}", streamId, rtspUrl, flvOutput);
             return true;
             
         } catch (IOException e) {
-            log.error("启动FFmpeg失败: streamId={}, error={}", streamId, e.getMessage(), e);
+            log.error("[FLV-{}] 启动FFmpeg失败: error={}", streamId, e.getMessage(), e);
             cleanupStreamState(streamId);
             return false;
         }
@@ -398,14 +398,14 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             process.destroy();
             try {
                 if (!process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
-                    log.warn("FFmpeg进程未正常退出，强制终止: streamId={}", streamId);
+                    log.warn("[停止] FFmpeg进程未正常退出，强制终止: streamId={}", streamId);
                     process.destroyForcibly();
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                log.error("停止FFmpeg进程被中断: streamId={}", streamId);
+                log.error("[停止] 等待FFmpeg进程退出被中断: streamId={}", streamId);
             }
-            log.info("RTSP转HLS流已停止: streamId={}", streamId);
+            log.info("[{}] 流已停止", streamId);
         }
 
         // 清理所有监控线程
@@ -535,17 +535,17 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             for (File streamDir : streamDirs) {
                 String streamId = streamDir.getName();
                 if (!activeProcesses.containsKey(streamId)) {
-                    log.info("清理已停止的HLS流目录: {}", streamId);
+            log.info("[HLS清理] 已停止的流目录: {}", streamId);
                     deleteDirectory(streamDir);
                     cleanedCount++;
                 }
             }
             
             if (cleanedCount > 0) {
-                log.info("HLS目录清理完成，共清理 {} 个已停止的流目录", cleanedCount);
+                log.info("[HLS清理] 目录清理完成，共清理 {} 个已停止的流目录", cleanedCount);
             }
         } catch (Exception e) {
-            log.error("HLS目录清理失败", e);
+            log.error("[HLS清理] 目录清理失败", e);
         }
     }
     
@@ -561,28 +561,28 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                 // 检查 HLS 流是否已停止
                 if ("hls".equals(type) && (process == null || !process.isAlive())) {
                     if (!hasRecentViewer(streamId)) {
-                        log.info("[健康检查] HLS流 {} 已停止且无观众，停止清理", streamId);
+                        log.info("[健康检查-HLS] 流 {} 已停止且无观众，停止清理", streamId);
                         stopStream(streamId);
                         continue;
                     }
                     String rtspUrl = streamRtspUrls.get(streamId);
                     if (rtspUrl != null) {
-                        log.warn("[健康检查] HLS流 {} 已停止，清理状态后重启...", streamId);
+                        log.warn("[健康检查-HLS] 流 {} 已停止，清理状态后重启...", streamId);
                         cleanupStreamState(streamId);
                         streamThreads.remove(streamId);
 
                         try {
                             if (startStream(rtspUrl, streamId)) {
                                 reconnectAttempts.remove(streamId);
-                                log.info("[健康检查] HLS流 {} 重启成功", streamId);
+                                log.info("[健康检查-HLS] 流 {} 重启成功", streamId);
                             } else {
-                                log.error("[健康检查] HLS流 {} 重启失败", streamId);
+                                log.error("[健康检查-HLS] 流 {} 重启失败", streamId);
                             }
                         } catch (Exception e) {
-                            log.error("[健康检查] 重启HLS流 {} 失败: {}", streamId, e.getMessage(), e);
+                            log.error("[健康检查-HLS] 重启流 {} 失败: {}", streamId, e.getMessage(), e);
                         }
                     } else {
-                        log.warn("[健康检查] HLS流 {} 缺少RTSP地址，停止并清理", streamId);
+                        log.warn("[健康检查-HLS] 流 {} 缺少RTSP地址，停止并清理", streamId);
                         stopStream(streamId);
                     }
                 }
@@ -597,24 +597,24 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                 if (hasRecentViewer(streamId)) {
                     String rtspUrl = streamRtspUrls.get(streamId);
                     if (rtspUrl != null) {
-                        log.warn("[健康检查] HLS流 {} 进程已移除但有观众，尝试恢复", streamId);
+                        log.warn("[健康检查-HLS] 流 {} 进程已移除但有观众，尝试恢复", streamId);
                         try {
                             cleanupStreamThreads(streamId);
                             cleanupStreamState(streamId);
                             if (startStream(rtspUrl, streamId)) {
                                 reconnectAttempts.remove(streamId);
-                                log.info("[健康检查] HLS流 {} 恢复成功", streamId);
+                                log.info("[健康检查-HLS] 流 {} 恢复成功", streamId);
                             } else {
-                                log.error("[健康检查] HLS流 {} 恢复失败", streamId);
+                                log.error("[健康检查-HLS] 流 {} 恢复失败", streamId);
                             }
                         } catch (Exception e) {
-                            log.error("[健康检查] 恢复HLS流 {} 失败: {}", streamId, e.getMessage(), e);
+                            log.error("[健康检查-HLS] 恢复流 {} 失败: {}", streamId, e.getMessage(), e);
                         }
                     }
                 }
             }
         } catch (Exception e) {
-            log.error("HLS流健康检查失败", e);
+            log.error("[健康检查-HLS] 健康检查失败", e);
         }
     }
     
@@ -642,7 +642,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             
             for (String streamId : inactiveStreams) {
                 long inactiveTime = (now - streamLastAccessTime.get(streamId)) / 1000;
-                log.warn("[自动停止] 流 {} 超过{}秒无访问，自动停止", streamId, inactiveTime);
+                log.warn("[自动停止] 流 {} 超过 {} 秒无访问，自动停止", streamId, inactiveTime);
                 stopStream(streamId);
             }
         } catch (Exception e) {
@@ -674,7 +674,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                 String streamId = streamDir.getName();
                 if (!activeProcesses.containsKey(streamId)) {
                     long dirSize = getDirectorySize(streamDir);
-                    log.info("清理已停止的FLV流目录: {}, 大小: {}MB", streamId, dirSize / (1024 * 1024));
+                    log.info("[FLV清理] 已停止的流目录: {}, 大小: {}MB", streamId, dirSize / (1024 * 1024));
                     deleteDirectory(streamDir);
                     cleanedCount++;
                     totalCleanedSize += dirSize;
@@ -684,11 +684,11 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             }
             
             if (cleanedCount > 0) {
-                log.info("FLV目录清理完成，共清理 {} 个已停止的流目录，释放空间: {}MB", 
+                log.info("[FLV清理] 目录清理完成，共清理 {} 个已停止的流目录，释放空间: {}MB",
                         cleanedCount, totalCleanedSize / (1024 * 1024));
             }
         } catch (Exception e) {
-            log.error("FLV目录清理失败", e);
+            log.error("[FLV清理] 目录清理失败", e);
         }
     }
     
@@ -703,28 +703,28 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
 
                 if ("flv".equals(type) && (process == null || !process.isAlive())) {
                     if (!hasRecentViewer(streamId)) {
-                        log.info("[健康检查] FLV流 {} 已停止且无观众，停止清理", streamId);
+                        log.info("[健康检查-FLV] 流 {} 已停止且无观众，停止清理", streamId);
                         stopStream(streamId);
                         continue;
                     }
                     String rtspUrl = streamRtspUrls.get(streamId);
                     if (rtspUrl != null) {
-                        log.warn("[健康检查] FLV流 {} 已停止，清理状态后重启...", streamId);
+                        log.warn("[健康检查-FLV] 流 {} 已停止，清理状态后重启...", streamId);
                         cleanupStreamState(streamId);
                         streamThreads.remove(streamId);
 
                         try {
                             if (startFlvStream(rtspUrl, streamId)) {
                                 reconnectAttempts.remove(streamId);
-                                log.info("[健康检查] FLV流 {} 重启成功", streamId);
+                                log.info("[健康检查-FLV] 流 {} 重启成功", streamId);
                             } else {
-                                log.error("[健康检查] FLV流 {} 重启失败", streamId);
+                                log.error("[健康检查-FLV] 流 {} 重启失败", streamId);
                             }
                         } catch (Exception e) {
-                            log.error("[健康检查] 重启FLV流 {} 失败: {}", streamId, e.getMessage(), e);
+                            log.error("[健康检查-FLV] 重启流 {} 失败: {}", streamId, e.getMessage(), e);
                         }
                     } else {
-                        log.warn("[健康检查] FLV流 {} 缺少RTSP地址，停止并清理", streamId);
+                        log.warn("[健康检查-FLV] 流 {} 缺少RTSP地址，停止并清理", streamId);
                         stopStream(streamId);
                     }
                 }
@@ -738,24 +738,24 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                 if (hasRecentViewer(streamId)) {
                     String rtspUrl = streamRtspUrls.get(streamId);
                     if (rtspUrl != null) {
-                        log.warn("[健康检查] FLV流 {} 进程已移除但有观众，尝试恢复", streamId);
+                        log.warn("[健康检查-FLV] 流 {} 进程已移除但有观众，尝试恢复", streamId);
                         try {
                             cleanupStreamThreads(streamId);
                             cleanupStreamState(streamId);
                             if (startFlvStream(rtspUrl, streamId)) {
                                 reconnectAttempts.remove(streamId);
-                                log.info("[健康检查] FLV流 {} 恢复成功", streamId);
+                                log.info("[健康检查-FLV] 流 {} 恢复成功", streamId);
                             } else {
-                                log.error("[健康检查] FLV流 {} 恢复失败", streamId);
+                                log.error("[健康检查-FLV] 流 {} 恢复失败", streamId);
                             }
                         } catch (Exception e) {
-                            log.error("[健康检查] 恢复FLV流 {} 失败: {}", streamId, e.getMessage(), e);
+                            log.error("[健康检查-FLV] 恢复流 {} 失败: {}", streamId, e.getMessage(), e);
                         }
                     }
                 }
             }
         } catch (Exception e) {
-            log.error("FLV流健康检查失败", e);
+            log.error("[健康检查-FLV] 健康检查失败", e);
         }
     }
     
@@ -774,7 +774,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                 if (fileAge > maxAgeMs) {
                     long fileSize = file.length();
                     if (file.delete()) {
-                        log.info("清理过期FLV分片文件: {}, 大小: {}MB", 
+                        log.info("[FLV清理] 清理过期FLV分片文件: {}, 大小: {}MB",
                                 file.getName(), fileSize / (1024 * 1024));
                     }
                 }
@@ -840,19 +840,19 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         Thread monitorThread = new Thread(() -> {
             try {
                 int exitCode = process.waitFor();
-                log.warn("[FFmpeg-{}] {}进程已退出，退出码: {}", streamId,
+                log.warn("[进程监控-{}] {} 进程已退出，退出码: {}", streamId,
                         capturedType != null ? capturedType.toUpperCase() : "UNKNOWN", exitCode);
                 activeProcesses.remove(streamId);
                 hlsFileReady.remove(streamId);
                 flvFileReady.remove(streamId);
                 streamStatus.put(streamId, "exited with code " + exitCode);
-                log.info("[FFmpeg-{}] {}进程状态已标记为exited，等待健康检查或拦截器恢复", streamId,
+                log.info("[进程监控-{}] {} 状态已标记为exited，等待拦截器或健康检查恢复", streamId,
                         capturedType != null ? capturedType.toUpperCase() : "UNKNOWN");
                 // 进程监控不再主动重连，交由拦截器或健康检查统一处理
                 // 避免与拦截器的tryRecoverStream和健康检查冲突
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                log.error("[FFmpeg-{}] 进程监控被中断", streamId);
+                log.warn("[进程监控-{}] 监控线程被中断", streamId);
             }
         }, "rtsp-process-monitor-" + streamId);
         monitorThread.setDaemon(true);
@@ -874,7 +874,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                         File[] tsFiles = m3u8Dir.listFiles((dir, name) -> name.endsWith(".ts"));
                         if (tsFiles != null && tsFiles.length > 0) {
                             hlsFileReady.put(streamId, true);
-                            log.info("[FFmpeg-{}] HLS文件已就绪，分片数: {}", streamId, tsFiles.length);
+                            log.info("[文件监控-HLS-{}] HLS文件已就绪，分片数: {}", streamId, tsFiles.length);
                             return;
                         }
                     }
@@ -890,7 +890,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                 }
             }
             
-            log.warn("[FFmpeg-{}] HLS文件生成超时: {}", streamId, m3u8Path);
+                    log.warn("[文件监控-HLS-{}] HLS文件生成超时: {}", streamId, m3u8Path);
             hlsFileReady.put(streamId, false);
         }, "rtsp-hls-file-monitor-" + streamId);
         monitorThread.setDaemon(true);
@@ -961,9 +961,9 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             if (!isStreamStuck(streamId, type)) {
                 return;
             }
-            log.warn("[恢复] 流 {} 进程卡死（文件超过30秒未写入），强制重启", streamId);
+            log.warn("[恢复-{}-{}] 进程卡死（文件超过30秒未写入），强制重启", streamId, type);
         } else {
-            log.warn("[恢复] 流 {} 进程已停止，尝试恢复 (type={})", streamId, type);
+            log.warn("[恢复-HLS-{}] 流已停止，尝试恢复 (type={})", streamId, type);
         }
 
         // 停止旧进程（确保完全退出）
@@ -1000,11 +1000,11 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                 String newName = "live_" + System.currentTimeMillis() + ".flv";
                 File newFlvFile = new File(streamDir, newName);
                 if (oldFlvFile.renameTo(newFlvFile)) {
-                    log.info("[恢复] 旧FLV文件已重命名: {}", newName);
+                    log.info("[恢复-FLV-{}] 旧FLV文件已重命名: {}", streamId, newName);
                 } else {
                     // rename失败，直接删除旧文件
                     if (oldFlvFile.delete()) {
-                        log.info("[恢复] 旧FLV文件已删除: {}", oldFlvFile.getAbsolutePath());
+                        log.info("[恢复-FLV-{}] 旧FLV文件已删除: {}", streamId, oldFlvFile.getAbsolutePath());
                     }
                 }
             }
@@ -1014,13 +1014,13 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                 String newName = "index_" + System.currentTimeMillis() + ".m3u8";
                 File newM3u8 = new File(streamDir, newName);
                 if (oldM3u8.renameTo(newM3u8)) {
-                    log.info("[恢复] 旧HLS播放列表已重命名: {}", newName);
+                    log.info("[恢复-HLS-{}] 旧HLS播放列表已重命名: {}", streamId, newName);
                 }
             }
         }
 
         try {
-            log.info("[恢复] 正在调用 startFlvStream/startStream: streamId={}, type={}", streamId, type);
+            log.info("[恢复-{}-{}] 正在调用 startFlvStream/startStream", type, streamId);
             boolean success;
             if ("flv".equals(type)) {
                 success = startFlvStream(rtspUrl, streamId);
@@ -1030,16 +1030,16 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                 log.error("[恢复] 未知流类型: {}", streamId);
                 return;
             }
-            log.info("[恢复] startFlvStream/startStream 返回结果: streamId={}, success={}, processAlive={}",
-                    streamId, success, isStreamActive(streamId));
+            log.info("[恢复-{}-{}] startFlvStream/startStream 返回结果: success={}, processAlive={}",
+                    type, streamId, success, isStreamActive(streamId));
 
             if (success) {
-                log.info("[恢复] 流 {} 恢复成功", streamId);
+                log.info("[恢复-{}-{}] 恢复成功", type, streamId);
             } else {
-                log.error("[恢复] 流 {} 恢复失败", streamId);
+                log.error("[恢复-{}-{}] 恢复失败", type, streamId);
             }
         } catch (Exception e) {
-            log.error("[恢复] 流 {} 恢复异常: {}", streamId, e.getMessage(), e);
+            log.error("[恢复-{}-{}] 恢复异常: {}", type, streamId, e.getMessage(), e);
         }
     }
 
@@ -1084,7 +1084,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                 File flvFile = new File(flvPath);
                 if (flvFile.exists() && flvFile.length() > 0) {
                     flvFileReady.put(streamId, true);
-                    log.info("[FFmpeg-{}] FLV文件已就绪: {}", streamId, flvPath);
+                    log.info("[文件监控-FLV-{}] FLV文件已就绪: {}", streamId, flvPath);
                     startFlvFileSizeMonitor(streamId, flvFile);
                     return;
                 }
@@ -1099,7 +1099,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                 }
             }
             
-            log.warn("[FFmpeg-{}] FLV文件生成超时: {}", streamId, flvPath);
+            log.warn("[文件监控-FLV-{}] FLV文件生成超时: {}", streamId, flvPath);
             flvFileReady.put(streamId, false);
         }, "rtsp-flv-file-monitor-" + streamId);
         monitorThread.setDaemon(true);
@@ -1122,7 +1122,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                         long fileSizeMb = fileSize / (1024 * 1024);
 
                         if (fileSize >= maxFileSizeBytes) {
-                            log.warn("[FFmpeg-{}] FLV文件大小超过限制 ({}MB >= {}MB)，重启FFmpeg进程",
+                            log.warn("[FLV大小监控-{}] FLV文件大小超过限制 ({}MB >= {}MB)，重启FFmpeg进程",
                                     streamId, fileSizeMb, flvMaxFileSizeMb);
                             restartFlvStream(streamId);
                             return;
@@ -1130,13 +1130,13 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
 
                         // 每增加 100MB 记录一次日志，避免重复触发
                         if (fileSizeMb >= lastLoggedSizeMb + 100 && fileSizeMb > 0) {
-                            log.info("[FFmpeg-{}] FLV文件大小: {}MB", streamId, fileSizeMb);
+                            log.info("[FLV大小监控-{}] FLV文件大小: {}MB", streamId, fileSizeMb);
                             lastLoggedSizeMb = fileSizeMb;
                         }
                     }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    log.error("[FFmpeg-{}] FLV文件大小监控被中断", streamId);
+                    log.warn("[FLV大小监控-{}] 文件大小监控线程被中断", streamId);
                     return;
                 }
             }
@@ -1177,32 +1177,32 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         if (oldFile.exists()) {
             File newFile = new File(newFlvPath);
             if (oldFile.renameTo(newFile)) {
-                log.info("[FFmpeg-{}] 旧FLV文件已重命名: {}", streamId, newFlvPath);
+                log.info("[FLV重启-{}] 旧FLV文件已重命名: {}", streamId, newFlvPath);
             }
         }
 
         if (rtspUrl != null && !rtspUrl.isEmpty()) {
-            log.info("[FFmpeg-{}] 正在重启FLV流...", streamId);
+            log.info("[FLV重启-{}] 正在重启FLV流...", streamId);
             try {
                 Thread.sleep(1000);
                 boolean success = startFlvStream(rtspUrl, streamId);
                 if (success) {
-                    log.info("[FFmpeg-{}] FLV流重启成功", streamId);
+                    log.info("[FLV重启-{}] FLV流重启成功", streamId);
                 } else {
-                    log.error("[FFmpeg-{}] FLV流重启失败", streamId);
+                    log.error("[FLV重启-{}] FLV流重启失败", streamId);
                 }
             } catch (Exception e) {
-                log.error("[FFmpeg-{}] FLV流重启异常: {}", streamId, e.getMessage(), e);
+                log.error("[FLV重启-{}] FLV流重启异常: {}", streamId, e.getMessage(), e);
             }
         } else {
-            log.error("[FFmpeg-{}] 无法获取RTSP地址，FLV流重启失败", streamId);
+            log.error("[FLV重启-{}] 无法获取RTSP地址，FLV流重启失败", streamId);
             streamStatus.put(streamId, "stopped: file size limit, restart failed");
         }
     }
     
     @PreDestroy
     public void destroy() {
-        log.info("应用关闭，正在停止所有RTSP转HLS流...");
+        log.info("应用关闭，正在停止所有RTSP转流...");
         stopAllStreams();
     }
 }
