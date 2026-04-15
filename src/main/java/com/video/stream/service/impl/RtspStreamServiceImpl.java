@@ -284,7 +284,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             
             if (existingProcess != null && existingProcess.isAlive()) {
                 if ("flv".equals(existingType)) {
-            log.info("[FLV-{}] FLV流已存在且正在运行，返回现有流信息", streamId);
+                    log.info("[FLV-{}] FLV流已存在且正在运行，返回现有流信息", streamId);
                     return true;
                 } else {
                     log.warn("[FLV-{}] 流已存在但类型为{}，需要先停止", streamId, existingType);
@@ -502,12 +502,17 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             return;
         }
 
-        long pid = -1;
-        try {
-            pid = process.pid();
-        } catch (UnsupportedOperationException e) {
-            // Java 8 不支持，回退到简单 destroy
+        long pid = getProcessPid(process);
+        if (pid < 0) {
+            // 无法获取 PID，回退到简单 destroy
             process.destroy();
+            try {
+                if (!process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                    process.destroyForcibly();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
             return;
         }
 
@@ -551,6 +556,42 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * 获取进程 PID（兼容 Java 8）
+     * Java 8 中 Process 没有 pid() 方法，通过反射从 Win32Process/UNIXProcess 获取
+     */
+    private long getProcessPid(Process process) {
+        try {
+            // Java 9+ 直接调用 pid()
+            java.lang.reflect.Method pidMethod = Process.class.getMethod("pid");
+            return (Long) pidMethod.invoke(process);
+        } catch (NoSuchMethodException e) {
+            // Java 8: 通过反射从实现类获取 PID
+            try {
+                String className = process.getClass().getName();
+                if (className.contains("Win32Process") || className.contains("ProcessImpl")) {
+                    java.lang.reflect.Field handleField = process.getClass().getDeclaredField("handle");
+                    handleField.setAccessible(true);
+                    long handle = handleField.getLong(process);
+                    // Windows: 通过 handle 获取 PID
+                    java.lang.reflect.Method getProcessIdMethod = process.getClass().getDeclaredMethod("getProcessId");
+                    getProcessIdMethod.setAccessible(true);
+                    return (Integer) getProcessIdMethod.invoke(process);
+                } else if (className.contains("UNIXProcess")) {
+                    java.lang.reflect.Field pidField = process.getClass().getDeclaredField("pid");
+                    pidField.setAccessible(true);
+                    return pidField.getLong(process);
+                }
+            } catch (Exception ex) {
+                log.warn("[进程清理] 反射获取PID失败: {}", ex.getMessage());
+            }
+            return -1;
+        } catch (Exception e) {
+            log.warn("[进程清理] 获取PID失败: {}", e.getMessage());
+            return -1;
         }
     }
 
@@ -607,7 +648,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             for (File streamDir : streamDirs) {
                 String streamId = streamDir.getName();
                 if (!activeProcesses.containsKey(streamId)) {
-            log.info("[HLS清理] 已停止的流目录: {}", streamId);
+                    log.info("[HLS清理] 已停止的流目录: {}", streamId);
                     deleteDirectory(streamDir);
                     cleanedCount++;
                 }
@@ -1033,7 +1074,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                 }
             }
             
-                    log.warn("[文件监控-HLS-{}] HLS文件生成超时: {}", streamId, m3u8Path);
+            log.warn("[文件监控-HLS-{}] HLS文件生成超时: {}", streamId, m3u8Path);
             hlsFileReady.put(streamId, false);
         }, "rtsp-hls-file-monitor-" + streamId);
         monitorThread.setDaemon(true);
