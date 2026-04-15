@@ -946,27 +946,30 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             log.warn("[恢复] 流 {} 进程已停止，尝试恢复 (type={})", streamId, type);
         }
 
-        // 停止旧进程
+        // 停止旧进程（确保完全退出）
         if (process != null && process.isAlive()) {
             process.destroy();
             try {
                 if (!process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
                     process.destroyForcibly();
+                    Thread.sleep(500); // 等待进程完全退出
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
         }
 
-        // 清理旧监控线程和状态
+        // 清理旧监控线程
         cleanupStreamThreads(streamId);
-        cleanupStreamState(streamId);
 
-        // 保留必要信息用于恢复
-        streamRtspUrls.put(streamId, rtspUrl);
-        if (type != null) {
-            streamType.put(streamId, type);
-        }
+        // 清理状态（不删除streamRtspUrls、streamType、streamLastAccessTime）
+        activeProcesses.remove(streamId);
+        streamStatus.remove(streamId);
+        streamStartTime.remove(streamId);
+        hlsFileReady.remove(streamId);
+        flvFileReady.remove(streamId);
+        reconnectAttempts.remove(streamId);
+        lastReconnectTime.remove(streamId);
 
         String outputDir = "flv".equals(type) ? flvOutputPath : hlsOutputPath;
         String streamDir = outputDir + "/" + streamId;
@@ -992,6 +995,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         }
 
         try {
+            log.info("[恢复] 正在调用 startFlvStream/startStream: streamId={}, type={}", streamId, type);
             boolean success;
             if ("flv".equals(type)) {
                 success = startFlvStream(rtspUrl, streamId);
@@ -1001,6 +1005,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                 log.error("[恢复] 未知流类型: {}", streamId);
                 return;
             }
+            log.info("[恢复] startFlvStream/startStream 返回结果: streamId={}, success={}", streamId, success);
 
             if (success) {
                 log.info("[恢复] 流 {} 恢复成功", streamId);
