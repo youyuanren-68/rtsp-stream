@@ -73,7 +73,7 @@ public class HlsAccessInterceptor implements HandlerInterceptor {
                 }
             }
 
-            log.warn("[HLS-{}] FFmpeg恢复后m3u8文件仍未就绪，返回404", streamId);
+            log.warn("[HLS拦截-{}] FFmpeg恢复后m3u8文件仍未就绪（等待5秒超时），返回404", streamId);
             response.setStatus(HttpServletResponse.SC_NOT_FOUND);
             return false;
         }

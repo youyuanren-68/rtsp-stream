@@ -215,10 +215,8 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             "-f", "hls",
             "-hls_time", String.valueOf(segmentTime),
             "-hls_list_size", String.valueOf(listSize),
-            "-hls_flags", "delete_segments+program_date_time",
+            "-hls_flags", "delete_segments",
             "-hls_segment_filename", streamDir + "/seg_%05d.ts",
-            "-hls_start_number_source", "generic",
-            "-hls_allow_cache", "1",
             "-y",
             m3u8Path
         );
