@@ -37,9 +37,9 @@ public class FlvStreamController {
         // 恢复已停止的流
         streamService.tryRecoverStream(streamId);
 
-        // FFmpeg 恢复后需要时间创建文件，最多等待3秒
+        // FFmpeg 需要时间连接RTSP源、转码并创建文件，最多等待10秒
         File flvFile = null;
-        for (int i = 0; i < 30; i++) {
+        for (int i = 0; i < 100; i++) {
             Path flvPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
             File f = flvPath.toFile();
             if (f.exists() && f.length() > 0) {
@@ -59,8 +59,8 @@ public class FlvStreamController {
                 response.setStatus(HttpServletResponse.SC_NOT_FOUND);
                 return;
             }
-            // 流活跃但文件还未创建，再短暂等待
-            for (int i = 0; i < 20; i++) {
+            // 流活跃但文件还未创建，再等待10秒（FFmpeg可能需要更长时间连接RTSP源）
+            for (int i = 0; i < 100; i++) {
                 Path flvPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
                 File f = flvPath.toFile();
                 if (f.exists() && f.length() > 0) {
@@ -73,7 +73,7 @@ public class FlvStreamController {
                 }
             }
             if (flvFile == null) {
-                log.warn("[FLV-{}] 流活跃但FLV文件创建超时(2秒)，返回404", streamId);
+                log.warn("[FLV-{}] 流活跃但FLV文件创建超时(20秒)，返回404", streamId);
                 response.setStatus(HttpServletResponse.SC_NOT_FOUND);
                 return;
             }
