@@ -205,6 +205,11 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         ProcessBuilder processBuilder = new ProcessBuilder(
             ffmpegPath,
             "-rtsp_transport", rtspTransport,
+            "-timeout", "30000000",
+            "-reconnect", "1",
+            "-reconnect_at_eof", "1",
+            "-reconnect_stream_inf", "1",
+            "-reconnect_delay_max", "5",
             "-fflags", "nobuffer",
             "-flags", "low_delay",
             "-i", rtspUrl,
@@ -343,6 +348,8 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             "-flags", "low_delay",
             "-rtsp_transport", rtspTransport,
             "-timeout", "30000000",
+            "-reconnect", "1",
+            "-reconnect_delay_max", "5",
             "-i", rtspUrl,
             "-c:v", videoCodec,
             "-preset", preset,
@@ -1095,9 +1102,15 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         String rtspUrl = streamRtspUrls.get(streamId);
         String type = streamType.get(streamId);
         Process process = activeProcesses.get(streamId);
+        Long lastAccess = streamLastAccessTime.get(streamId);
 
         if (rtspUrl == null) {
-            log.warn("[恢复] 流 {} 缺少RTSP地址，无法恢复", streamId);
+            // RTSP地址丢失说明该流从未被正确启动或服务器重启后状态丢失
+            // 如果有最近访问记录，说明有用户在等待，记录详细日志便于排查
+            boolean hasViewer = lastAccess != null && (System.currentTimeMillis() - lastAccess) < autoStopTimeout;
+            log.warn("[恢复-{}] 缺少RTSP地址，无法恢复 | type={}, process={}, hasViewer={}, lastAccess={}ms前",
+                    streamId, type, (process != null && process.isAlive()) ? "alive" : "dead",
+                    hasViewer, lastAccess != null ? (System.currentTimeMillis() - lastAccess) : -1);
             return;
         }
 

@@ -91,7 +91,7 @@ public class FlvStreamController {
         response.setHeader("Pragma", "no-cache");
         response.setHeader("Access-Control-Allow-Origin", "*");
         response.setHeader("Connection", "keep-alive");
-        response.setHeader("Transfer-Encoding", "chunked");
+        // 不手动设置 Transfer-Encoding: chunked，Tomcat 会自动添加
 
         streamService.recordStreamAccess(streamId);
 
