@@ -113,8 +113,9 @@ public class FlvStreamController {
             long totalBytesSent = 0;
 
             // 文件切换/恢复检测：当文件不增长时触发
-            int fileSwitchThreshold = 300; // 300 * 20ms = 6秒
+            int fileSwitchCheckInterval = 300; // 每 300 次循环（约6秒）检查一次
             long lastRecoveryCheck = 0;
+            int lastActiveCheck = 0; // 记录上次检查 FFmpeg 存活时的 stableCount
 
             log.info("[FLV-{}] 开始流式传输: {}", streamId, flvFile.getAbsolutePath());
 
@@ -131,11 +132,15 @@ public class FlvStreamController {
 
                     if (fileLength == lastFileSize) {
                         stableCount++;
+
+                        // 关键修复：如果 FFmpeg 还在运行但文件不增长，
+                        // 可能是 FFmpeg 内部缓冲或磁盘延迟，不退出
                         if (stableCount > stableCountLimit) {
-                            // FFmpeg 还在运行时，给予更多容忍时间
                             boolean active = streamService.isStreamActive(streamId);
                             if (active) {
-                                log.warn("[FLV-{}] FFmpeg进程运行中但文件 {} 秒未增长，继续等待", streamId, stableCountLimit / 10);
+                                // 每 30 秒记录一次日志，避免刷屏
+                                log.warn("[FLV-{}] FFmpeg进程运行中但文件 {} 秒未增长，继续等待",
+                                        streamId, stableCountLimit / 10);
                                 Thread.sleep(500);
                                 continue;
                             }
@@ -157,10 +162,11 @@ public class FlvStreamController {
                                 try { raf.close(); } catch (IOException ignored) {}
                                 raf = null;
                                 stableCount = 0;
+                                noDataCount = 0;
 
-                                // 等待新FFmpeg创建live.flv，最多5秒
+                                // 等待新FFmpeg创建live.flv，最多10秒
                                 Path expectedPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
-                                for (int wait = 0; wait < 50; wait++) {
+                                for (int wait = 0; wait < 100; wait++) {
                                     File expectedFile = expectedPath.toFile();
                                     if (expectedFile.exists() && expectedFile.length() > 0) {
                                         try {
@@ -172,7 +178,7 @@ public class FlvStreamController {
                                             return;
                                         }
                                         lastFileSize = 0;
-                                        noDataCount = 0;
+                                        lastActiveCheck = 0;
                                         break;
                                     }
                                     try { Thread.sleep(100); } catch (InterruptedException e) {
@@ -182,15 +188,18 @@ public class FlvStreamController {
                                 }
 
                                 if (raf == null) {
-                                    log.warn("[FLV-{}] 恢复后新FLV文件仍未创建（等待5秒超时），结束传输", streamId);
+                                    log.warn("[FLV-{}] 恢复后新FLV文件仍未创建（等待10秒超时），结束传输", streamId);
                                     return;
                                 }
                                 continue;
                             }
                         }
 
-                        // 检测到 FFmpeg 可能已重启（文件大小不匹配，说明文件被重命名后重建）
-                        if (stableCount == fileSwitchThreshold && streamService.isStreamActive(streamId)) {
+                        // 检测到 FFmpeg 可能已重启：每隔一段时间检查文件大小是否变化
+                        if (stableCount >= fileSwitchCheckInterval &&
+                            (stableCount - lastActiveCheck) >= fileSwitchCheckInterval &&
+                            streamService.isStreamActive(streamId)) {
+                            lastActiveCheck = stableCount;
                             Path expectedPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
                             File expectedFile = expectedPath.toFile();
                             if (expectedFile.exists()) {
@@ -210,6 +219,7 @@ public class FlvStreamController {
                                     }
                                     stableCount = 0;
                                     lastFileSize = 0;
+                                    lastActiveCheck = 0;
                                     continue;
                                 }
                             }
