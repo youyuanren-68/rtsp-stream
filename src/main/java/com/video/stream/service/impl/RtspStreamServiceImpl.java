@@ -1256,14 +1256,10 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
                         long fileSizeMb = fileSize / (1024 * 1024);
 
                         if (fileSize >= maxFileSizeBytes) {
-                            // 不重启FFmpeg（会导致观众断流），而是直接截断文件尾部
-                            // 从文件中间开始截断，保留最近的数据，删除旧数据
-                            // FLV头部在文件开头，截断后会丢失，但FFmpeg还在持续写入新数据
-                            // 所以截断后文件大小会自然从0开始增长（FFmpeg会检测到文件损坏并重新写入）
-                            truncateFlvFile(streamId, flvFile, fileSize);
-                            lastLoggedSizeMb = 0;
-                            log.info("[FLV大小监控-{}] 文件已截断: {}MB -> 0MB, FFmpeg将继续写入",
-                                    streamId, fileSizeMb);
+                            log.warn("[FLV大小监控-{}] FLV文件大小超过限制 ({}MB >= {}MB)，重启FFmpeg进程",
+                                    streamId, fileSizeMb, flvMaxFileSizeMb);
+                            restartFlvStream(streamId);
+                            return;
                         }
 
                         // 每增加 100MB 记录一次日志，避免重复触发
@@ -1285,44 +1281,59 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
     }
 
     /**
-     * 截断FLV文件：当文件过大时，删除整个文件让FFmpeg重新创建。
-     * FFmpeg检测到文件被删除后，会自动创建新文件并写入新的FLV header。
-     * 控制器会自动切换到新文件继续读取。
+     * 重启FLV流：当文件过大时重启FFmpeg。
+     * 注意：重启期间会有短暂中断（5-20秒），控制器会自动切换到新文件。
      */
-    private void truncateFlvFile(String streamId, File flvFile, long currentSize) {
-        try {
-            // 直接删除文件，FFmpeg会在下次写入时重新创建
-            // 在Windows上，如果FFmpeg正在写入文件，删除会失败
-            // 所以先重命名旧文件，再删除
-            String backupName = "live_" + System.currentTimeMillis() + ".flv";
-            File backupFile = new File(flvFile.getParentFile(), backupName);
-            if (flvFile.renameTo(backupFile)) {
-                // 重命名成功，FFmpeg会检测到文件消失并重新创建live.flv
-                log.info("[FLV截断-{}] 旧文件重命名为: {}", streamId, backupName);
-                // 延迟删除备份文件，给FFmpeg时间创建新文件
-                new Thread(() -> {
-                    try {
-                        Thread.sleep(3000);
-                        if (backupFile.exists()) {
-                            backupFile.delete();
-                            log.info("[FLV截断-{}] 备份文件已删除: {}, 释放: {}MB",
-                                    streamId, backupName, currentSize / (1024 * 1024));
-                        }
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                    }
-                }, "flv-cleanup-" + streamId).start();
-            } else {
-                // 重命名失败，可能是FFmpeg正在锁定文件，尝试直接删除
-                if (flvFile.delete()) {
-                    log.info("[FLV截断-{}] 文件已删除: {}, 释放: {}MB",
-                            streamId, flvFile.getAbsolutePath(), currentSize / (1024 * 1024));
-                } else {
-                    log.warn("[FLV截断-{}] 文件截断失败，文件仍为 {}MB", streamId, currentSize / (1024 * 1024));
-                }
+    private void restartFlvStream(String streamId) {
+        String rtspUrl = streamRtspUrls.get(streamId);
+
+        Process process = activeProcesses.get(streamId);
+        if (process != null && process.isAlive()) {
+            killProcessTree(process, streamId);
+        }
+
+        // 清理旧监控线程和状态
+        cleanupStreamThreads(streamId);
+        cleanupStreamState(streamId);
+
+        // 保留必要信息用于重启
+        streamRtspUrls.put(streamId, rtspUrl);
+        streamType.put(streamId, "flv");
+
+        String streamDir = flvOutputPath + "/" + streamId;
+        String oldFlvPath = streamDir + "/live.flv";
+
+        // 旧文件重命名，给新FFmpeg腾出空间
+        File oldFile = new File(oldFlvPath);
+        if (oldFile.exists()) {
+            String newFlvPath = streamDir + "/live_" + System.currentTimeMillis() + ".flv";
+            File newFile = new File(newFlvPath);
+            if (oldFile.renameTo(newFile)) {
+                log.info("[FLV重启-{}] 旧FLV文件已重命名: {}", streamId, newFlvPath);
             }
-        } catch (Exception e) {
-            log.error("[FLV截断-{}] 截断文件失败: {}", streamId, e.getMessage());
+        }
+
+        if (rtspUrl != null && !rtspUrl.isEmpty()) {
+            log.info("[FLV重启-{}] 正在重启FLV流...", streamId);
+            try {
+                Thread.sleep(1000);
+                boolean success = startFlvStream(rtspUrl, streamId);
+                if (success) {
+                    log.info("[FLV重启-{}] FLV流重启成功", streamId);
+                    reconnectAttempts.remove(streamId);
+                    // 新流启动后清理所有历史FLV文件（live_TIMESTAMP.flv）
+                    cleanupFlvHistoryFiles(streamId);
+                } else {
+                    reconnectAttempts.merge(streamId, 1, Integer::sum);
+                    log.error("[FLV重启-{}] FLV流重启失败", streamId);
+                }
+            } catch (Exception e) {
+                reconnectAttempts.merge(streamId, 1, Integer::sum);
+                log.error("[FLV重启-{}] FLV流重启异常: {}", streamId, e.getMessage(), e);
+            }
+        } else {
+            log.error("[FLV重启-{}] 无法获取RTSP地址，FLV流重启失败", streamId);
+            streamStatus.put(streamId, "stopped: file size limit, restart failed");
         }
     }
     
