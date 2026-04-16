@@ -15,12 +15,15 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
 @Service
@@ -83,6 +86,15 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
 
     @Value("${rtsp.stream.max-reconnect-attempts:10}")
     private int maxReconnectAttempts;
+
+    @Value("${rtsp.stream.stale-output-timeout:45000}")
+    private long staleOutputTimeout;
+
+    @Value("${rtsp.flv.history-retention-ms:300000}")
+    private long flvHistoryRetentionMs;
+
+    @Value("${rtsp.flv.history-file-limit:3}")
+    private int flvHistoryFileLimit;
     
     private final Map<String, Process> activeProcesses = new ConcurrentHashMap<>();
     private final Map<String, String> streamStatus = new ConcurrentHashMap<>();
@@ -92,6 +104,9 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
     private final Map<String, Boolean> flvFileReady = new ConcurrentHashMap<>();
     private final Map<String, String> streamRtspUrls = new ConcurrentHashMap<>();
     private final Map<String, Long> streamLastAccessTime = new ConcurrentHashMap<>();
+    private final Map<String, AtomicInteger> streamViewerCounts = new ConcurrentHashMap<>();
+    private final Map<String, Long> flvLastObservedSize = new ConcurrentHashMap<>();
+    private final Map<String, Long> streamLastOutputTime = new ConcurrentHashMap<>();
 
     // 线程追踪：用于在停止流时清理监控线程
     private final Map<String, List<Thread>> streamThreads = new ConcurrentHashMap<>();
@@ -120,6 +135,35 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             log.warn("FFmpeg可执行文件不存在: {}，请检查配置", ffmpegPath);
         } else {
             log.info("FFmpeg路径: {}", ffmpegPath);
+        }
+
+        cleanupLingeringFfmpegProcesses();
+        cleanupOldHlsFiles();
+        cleanupOldFlvFiles();
+    }
+
+    /**
+     * 启动时清理可能残留的旧 FLV 历史文件（live_TIMESTAMP.flv）
+     */
+    private void cleanupLingeringFfmpegProcesses() {
+        File flvDir = new File(flvOutputPath);
+        if (!flvDir.exists() || !flvDir.isDirectory()) return;
+        File[] streamDirs = flvDir.listFiles(File::isDirectory);
+        if (streamDirs == null) return;
+        int cleaned = 0;
+        long totalSize = 0;
+        for (File streamDir : streamDirs) {
+            File[] files = streamDir.listFiles();
+            if (files == null) continue;
+            for (File file : files) {
+                if (file.isFile() && file.getName().endsWith(".flv") && !file.getName().equals("live.flv")) {
+                    long size = file.length();
+                    if (file.delete()) { cleaned++; totalSize += size; }
+                }
+            }
+        }
+        if (cleaned > 0) {
+            log.info("[启动清理] 清理了 {} 个历史FLV文件，释放 {}MB 空间", cleaned, totalSize / (1024 * 1024));
         }
     }
     
@@ -234,6 +278,9 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             hlsFileReady.put(streamId, false);
             streamRtspUrls.put(streamId, rtspUrl);
             streamLastAccessTime.put(streamId, System.currentTimeMillis());
+            streamViewerCounts.computeIfAbsent(streamId, key -> new AtomicInteger());
+            streamLastOutputTime.put(streamId, System.currentTimeMillis());
+            flvLastObservedSize.remove(streamId);
             
             startLogReader(streamId, process);
             startProcessMonitor(streamId, process);
@@ -367,6 +414,9 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             flvFileReady.put(streamId, false);
             streamRtspUrls.put(streamId, rtspUrl);
             streamLastAccessTime.put(streamId, System.currentTimeMillis());
+            streamViewerCounts.computeIfAbsent(streamId, key -> new AtomicInteger());
+            streamLastOutputTime.put(streamId, System.currentTimeMillis());
+            flvLastObservedSize.put(streamId, 0L);
             
             startLogReader(streamId, process);
             startProcessMonitor(streamId, process);
@@ -1047,6 +1097,30 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
     
     public void recordStreamAccess(String streamId) {
         streamLastAccessTime.put(streamId, System.currentTimeMillis());
+    }
+
+    @Override
+    public void registerViewer(String streamId) {
+        AtomicInteger count = streamViewerCounts.computeIfAbsent(streamId, key -> new AtomicInteger());
+        count.incrementAndGet();
+        streamLastAccessTime.put(streamId, System.currentTimeMillis());
+    }
+
+    @Override
+    public void unregisterViewer(String streamId) {
+        AtomicInteger count = streamViewerCounts.get(streamId);
+        if (count != null) {
+            int remaining = count.decrementAndGet();
+            if (remaining <= 0) {
+                streamViewerCounts.remove(streamId);
+            }
+        }
+    }
+
+    @Override
+    public int getViewerCount(String streamId) {
+        AtomicInteger count = streamViewerCounts.get(streamId);
+        return count != null ? count.get() : 0;
     }
 
     /**

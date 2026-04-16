@@ -23,6 +23,12 @@ public interface IRtspStreamService {
 
     void recordStreamAccess(String streamId);
 
+    void registerViewer(String streamId);
+
+    void unregisterViewer(String streamId);
+
+    int getViewerCount(String streamId);
+
     void tryRecoverStream(String streamId);
 
     long getFlvFileLastModified(String streamId);
