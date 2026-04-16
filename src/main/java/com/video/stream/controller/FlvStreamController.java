@@ -114,10 +114,9 @@ public class FlvStreamController {
             long aliveCheckInterval = 5000;
             boolean processDied = false;
 
-            // 文件恢复/切换状态
-            long lastRecoveryCheck = 0;
-            long lastFileSwitchCheck = System.currentTimeMillis();
-            long fileSwitchInterval = 10000; // 每10秒检查一次文件是否被替换
+            // 文件被替换检测：当旧文件停止增长时，每 500ms 检查一次是否有新文件
+            long lastFileSwitchCheck = 0;
+            long fileSwitchCheckInterval = 500;
 
             log.info("[FLV-{}] 开始流式传输: {}", streamId, flvFile.getAbsolutePath());
 
@@ -179,8 +178,9 @@ public class FlvStreamController {
                         continue;
                     }
 
-                    // 检查文件是否被替换（FFmpeg 重启后旧文件被重命名，新文件路径相同但inode不同）
-                    if (now - lastFileSwitchCheck >= fileSwitchInterval) {
+                    // 检查文件是否被替换（FFmpeg 重启/截断后旧文件被重命名，新文件路径相同但内容不同）
+                    // 每 500ms 检查一次，确保在浏览器缓冲耗尽前切换到新文件
+                    if (now - lastFileSwitchCheck >= fileSwitchCheckInterval) {
                         lastFileSwitchCheck = now;
                         Path expectedPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
                         File expectedFile = expectedPath.toFile();
