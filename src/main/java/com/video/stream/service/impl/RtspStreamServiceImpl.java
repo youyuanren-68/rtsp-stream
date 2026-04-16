@@ -498,35 +498,23 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
 
     /**
      * 终止 FFmpeg 进程。
-     * 先 destroy() 优雅终止，等 2 秒；未退出则 destroyForcibly() 强制终止。
-     * 不调用外部命令（taskkill），避免子进程阻塞导致 Tomcat 线程卡死。
+     * 直接 destroyForcibly()，不阻塞等待。
+     * Windows 上 TerminateProcess 是即时操作，不会阻塞。
+     * 不阻塞调用线程，避免耗尽 Tomcat 线程池。
      */
     private void killProcessTree(Process process, String streamId) {
-        if (process == null || !process.isAlive()) {
+        if (process == null) {
             return;
         }
-
-        // 第一步：优雅终止
-        process.destroy();
         try {
-            if (process.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)) {
-                log.info("[进程清理] FFmpeg 进程已正常退出: streamId={}", streamId);
-                return;
+            // destroyForcibly() 在 Windows 上调 TerminateProcess，即时返回
+            // 不阻塞等待进程退出，让操作系统自行清理
+            if (process.isAlive()) {
+                process.destroyForcibly();
+                log.info("[进程清理] 已发送终止信号: streamId={}", streamId);
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-
-        // 第二步：强制终止（Windows 上 destroyForcibly 会调用 TerminateProcess）
-        process.destroyForcibly();
-        try {
-            if (process.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
-                log.info("[进程清理] FFmpeg 进程已强制退出: streamId={}", streamId);
-            } else {
-                log.warn("[进程清理] FFmpeg 进程强制退出超时: streamId={}", streamId);
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            log.warn("[进程清理] FFmpeg 进程清理异常: streamId={}, error={}", streamId, e.getMessage());
         }
     }
 
