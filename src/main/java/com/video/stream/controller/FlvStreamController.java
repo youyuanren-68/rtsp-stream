@@ -107,126 +107,103 @@ public class FlvStreamController {
             int maxNoDataCount = 36000;
             long lastAccessUpdate = System.currentTimeMillis();
             long lastFileSize = 0;
-            int stableCount = 0;
-            // 给足 30 分钟容忍 FFmpeg 重启/写入间隙
-            int stableCountLimit = 18000;
             long totalBytesSent = 0;
 
-            // 文件切换/恢复检测：当文件不增长时触发
-            int fileSwitchCheckInterval = 300; // 每 300 次循环（约6秒）检查一次
+            // FFmpeg 主动存活检查：每 5 秒检查一次 FFmpeg 进程是否还活着
+            long lastAliveCheck = System.currentTimeMillis();
+            long aliveCheckInterval = 5000;
+            boolean processDied = false;
+
+            // 文件恢复/切换状态
             long lastRecoveryCheck = 0;
-            int lastActiveCheck = 0; // 记录上次检查 FFmpeg 存活时的 stableCount
+            long lastFileSwitchCheck = System.currentTimeMillis();
+            long fileSwitchInterval = 10000; // 每10秒检查一次文件是否被替换
 
             log.info("[FLV-{}] 开始流式传输: {}", streamId, flvFile.getAbsolutePath());
 
             while (noDataCount < maxNoDataCount) {
+                // ===== 主动检查：FFmpeg 进程是否还活着 =====
+                long now = System.currentTimeMillis();
+                if (now - lastAliveCheck >= aliveCheckInterval) {
+                    lastAliveCheck = now;
+                    if (!streamService.isStreamActive(streamId)) {
+                        log.warn("[FLV-{}] 主动检测到FFmpeg进程已退出，触发恢复", streamId);
+                        processDied = true;
+                    }
+                }
+
                 long fileLength = raf.length();
                 long currentPosition = raf.getFilePointer();
 
                 if (currentPosition >= fileLength) {
-                    // 文件无新数据时，每 1 秒检测一次 FFmpeg 进程是否存活
-                    if (stableCount % 50 == 0 && !streamService.isStreamActive(streamId)) {
-                        log.warn("[FLV-{}] FFmpeg进程已退出但文件未增长，结束传输", streamId);
-                        break;
-                    }
+                    // ===== 没有新数据 =====
 
-                    if (fileLength == lastFileSize) {
-                        stableCount++;
+                    // 如果主动检测到进程已死亡，立即触发恢复
+                    if (processDied) {
+                        processDied = false;
+                        lastRecoveryCheck = System.currentTimeMillis();
+                        streamService.tryRecoverStream(streamId);
 
-                        // 关键修复：如果 FFmpeg 还在运行但文件不增长，
-                        // 可能是 FFmpeg 内部缓冲或磁盘延迟，不退出
-                        if (stableCount > stableCountLimit) {
-                            boolean active = streamService.isStreamActive(streamId);
-                            if (active) {
-                                // 每 30 秒记录一次日志，避免刷屏
-                                log.warn("[FLV-{}] FFmpeg进程运行中但文件 {} 秒未增长，继续等待",
-                                        streamId, stableCountLimit / 10);
-                                Thread.sleep(500);
-                                continue;
+                        // 关闭旧文件（已被tryRecoverStream重命名）
+                        try { raf.close(); } catch (IOException ignored) {}
+                        raf = null;
+
+                        // 等待新FFmpeg创建live.flv，最多15秒（给足FFmpeg连接RTSP源的时间）
+                        Path expectedPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
+                        for (int wait = 0; wait < 150; wait++) {
+                            File expectedFile = expectedPath.toFile();
+                            if (expectedFile.exists() && expectedFile.length() > 0) {
+                                try {
+                                    raf = new RandomAccessFile(expectedFile, "r");
+                                    flvFile = expectedFile;
+                                    log.info("[FLV-{}] 恢复后切换到新FLV文件: {}", streamId, expectedFile.getAbsolutePath());
+                                } catch (IOException e) {
+                                    log.error("[FLV-{}] 打开新FLV文件失败: {}", streamId, e.getMessage());
+                                    return;
+                                }
+                                lastFileSize = 0;
+                                noDataCount = 0;
+                                lastAliveCheck = System.currentTimeMillis();
+                                break;
                             }
-                            log.warn("[FLV-{}] FFmpeg已停止写入超过 {} 秒，文件大小: {}MB, 已发送: {}MB",
-                                    streamId, stableCountLimit / 10,
-                                    fileLength / (1024 * 1024), totalBytesSent / (1024 * 1024));
-                            break;
+                            try { Thread.sleep(100); } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                return;
+                            }
                         }
 
-                        // 检测到 FFmpeg 可能已死亡：文件 1 秒未增长且进程不活跃，触发恢复
-                        if (stableCount == 50 && System.currentTimeMillis() - lastRecoveryCheck > 10000) {
-                            lastRecoveryCheck = System.currentTimeMillis();
-                            boolean active = streamService.isStreamActive(streamId);
-                            if (!active) {
-                                log.warn("[FLV-{}] 检测到FFmpeg进程死亡，触发恢复", streamId);
-                                streamService.tryRecoverStream(streamId);
+                        if (raf == null) {
+                            log.warn("[FLV-{}] 恢复后新FLV文件仍未创建（等待15秒超时），结束传输", streamId);
+                            return;
+                        }
+                        continue;
+                    }
 
-                                // 关闭旧文件（已被tryRecoverStream重命名）
+                    // 检查文件是否被替换（FFmpeg 重启后旧文件被重命名，新文件路径相同但inode不同）
+                    if (now - lastFileSwitchCheck >= fileSwitchInterval) {
+                        lastFileSwitchCheck = now;
+                        Path expectedPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
+                        File expectedFile = expectedPath.toFile();
+                        if (expectedFile.exists()) {
+                            long expectedSize = expectedFile.length();
+                            long currentSize = raf.length();
+                            if (expectedSize != currentSize) {
+                                log.info("[FLV-{}] 检测到FFmpeg重启，切换读取新FLV文件: {} (旧: {}MB, 新: {}MB)",
+                                        streamId, expectedFile.getAbsolutePath(),
+                                        currentSize / (1024 * 1024), expectedSize / (1024 * 1024));
                                 try { raf.close(); } catch (IOException ignored) {}
-                                raf = null;
-                                stableCount = 0;
-                                noDataCount = 0;
-
-                                // 等待新FFmpeg创建live.flv，最多10秒
-                                Path expectedPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
-                                for (int wait = 0; wait < 100; wait++) {
-                                    File expectedFile = expectedPath.toFile();
-                                    if (expectedFile.exists() && expectedFile.length() > 0) {
-                                        try {
-                                            raf = new RandomAccessFile(expectedFile, "r");
-                                            flvFile = expectedFile;
-                                            log.info("[FLV-{}] 恢复后切换到新FLV文件: {}", streamId, expectedFile.getAbsolutePath());
-                                        } catch (IOException e) {
-                                            log.error("[FLV-{}] 打开新FLV文件失败: {}", streamId, e.getMessage());
-                                            return;
-                                        }
-                                        lastFileSize = 0;
-                                        lastActiveCheck = 0;
-                                        break;
-                                    }
-                                    try { Thread.sleep(100); } catch (InterruptedException e) {
-                                        Thread.currentThread().interrupt();
-                                        return;
-                                    }
-                                }
-
-                                if (raf == null) {
-                                    log.warn("[FLV-{}] 恢复后新FLV文件仍未创建（等待10秒超时），结束传输", streamId);
+                                try {
+                                    raf = new RandomAccessFile(expectedFile, "r");
+                                    flvFile = expectedFile;
+                                    noDataCount = 0;
+                                    lastFileSize = 0;
+                                } catch (IOException e) {
+                                    log.error("[FLV-{}] 打开新FLV文件失败: {}", streamId, e.getMessage());
                                     return;
                                 }
                                 continue;
                             }
                         }
-
-                        // 检测到 FFmpeg 可能已重启：每隔一段时间检查文件大小是否变化
-                        if (stableCount >= fileSwitchCheckInterval &&
-                            (stableCount - lastActiveCheck) >= fileSwitchCheckInterval &&
-                            streamService.isStreamActive(streamId)) {
-                            lastActiveCheck = stableCount;
-                            Path expectedPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
-                            File expectedFile = expectedPath.toFile();
-                            if (expectedFile.exists()) {
-                                long expectedSize = expectedFile.length();
-                                long currentSize = raf.length();
-                                if (expectedSize != currentSize) {
-                                    log.info("[FLV-{}] 检测到FFmpeg重启，切换读取新FLV文件: {} (旧: {}MB, 新: {}MB)",
-                                            streamId, expectedFile.getAbsolutePath(),
-                                            currentSize / (1024 * 1024), expectedSize / (1024 * 1024));
-                                    try { raf.close(); } catch (IOException ignored) {}
-                                    try {
-                                        raf = new RandomAccessFile(expectedFile, "r");
-                                        flvFile = expectedFile;
-                                    } catch (IOException e) {
-                                        log.error("[FLV-{}] 打开新FLV文件失败: {}", streamId, e.getMessage());
-                                        return;
-                                    }
-                                    stableCount = 0;
-                                    lastFileSize = 0;
-                                    lastActiveCheck = 0;
-                                    continue;
-                                }
-                            }
-                        }
-                    } else {
-                        stableCount = 0;
-                        lastFileSize = fileLength;
                     }
 
                     noDataCount++;
@@ -239,7 +216,7 @@ public class FlvStreamController {
                     continue;
                 }
 
-                stableCount = 0;
+                // ===== 有新数据，正常读取 =====
                 int bytesRead = raf.read(buffer);
                 if (bytesRead > 0) {
                     out.write(buffer, 0, bytesRead);
@@ -247,10 +224,10 @@ public class FlvStreamController {
                     noDataCount = 0;
                     totalBytesSent += bytesRead;
 
-                    long now = System.currentTimeMillis();
-                    if (now - lastAccessUpdate > 5000) {
+                    long now2 = System.currentTimeMillis();
+                    if (now2 - lastAccessUpdate > 5000) {
                         streamService.recordStreamAccess(streamId);
-                        lastAccessUpdate = now;
+                        lastAccessUpdate = now2;
                     }
                 } else {
                     noDataCount++;
