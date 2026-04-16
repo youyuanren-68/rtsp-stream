@@ -34,37 +34,29 @@ public class FlvStreamController {
                           HttpServletRequest request,
                           HttpServletResponse response) {
 
-        // 恢复已停止的流
-        streamService.tryRecoverStream(streamId);
+        // 快速路径：文件存在且流活跃，直接开始传输（不阻塞）
+        Path flvPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
+        File flvFile = flvPath.toFile();
+        boolean streamActive = streamService.isStreamActive(streamId);
 
-        // FFmpeg 需要时间连接RTSP源、转码并创建文件，最多等待10秒
-        File flvFile = null;
-        for (int i = 0; i < 100; i++) {
-            Path flvPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
-            File f = flvPath.toFile();
-            if (f.exists() && f.length() > 0) {
-                flvFile = f;
-                break;
-            }
-            try { Thread.sleep(100); } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-            }
-        }
-
-        // 文件未找到：流不活跃且无法恢复，返回404
-        if (flvFile == null) {
-            if (!streamService.isStreamActive(streamId)) {
-                log.warn("[FLV-{}] FLV文件不存在且流不活跃，返回404", streamId);
+        if (flvFile.exists() && flvFile.length() > 0) {
+            // 文件存在但流不活跃：是残留旧文件
+            if (!streamActive) {
+                log.debug("[FLV-{}] 文件存在但流不活跃，返回404", streamId);
                 response.setStatus(HttpServletResponse.SC_NOT_FOUND);
                 return;
             }
-            // 流活跃但文件还未创建，再等待10秒（FFmpeg可能需要更长时间连接RTSP源）
-            for (int i = 0; i < 100; i++) {
-                Path flvPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
-                File f = flvPath.toFile();
-                if (f.exists() && f.length() > 0) {
-                    flvFile = f;
+            streamService.recordStreamAccess(streamId);
+        } else {
+            // 文件不存在：先尝试恢复，再短暂等待
+            streamService.tryRecoverStream(streamId);
+
+            // 最多等待3秒让FFmpeg创建文件
+            for (int i = 0; i < 30; i++) {
+                if (flvFile.exists() && flvFile.length() > 0) {
+                    break;
+                }
+                if (!streamService.isStreamActive(streamId)) {
                     break;
                 }
                 try { Thread.sleep(100); } catch (InterruptedException e) {
@@ -72,18 +64,13 @@ public class FlvStreamController {
                     return;
                 }
             }
-            if (flvFile == null) {
-                log.warn("[FLV-{}] 流活跃但FLV文件创建超时(20秒)，返回404", streamId);
+
+            if (!flvFile.exists() || flvFile.length() == 0) {
+                log.debug("[FLV-{}] FLV文件未创建（等待3秒超时），返回404", streamId);
                 response.setStatus(HttpServletResponse.SC_NOT_FOUND);
                 return;
             }
-        }
-
-        // 文件存在但流不活跃：可能是服务器重启后的残留旧文件，不读取
-        if (!streamService.isStreamActive(streamId)) {
-            log.warn("[FLV-{}] FLV文件存在但流未启动（可能是残留旧文件），返回404", streamId);
-            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
-            return;
+            streamService.recordStreamAccess(streamId);
         }
 
         response.setContentType("video/x-flv");
@@ -146,9 +133,9 @@ public class FlvStreamController {
                         try { raf.close(); } catch (IOException ignored) {}
                         raf = null;
 
-                        // 等待新FFmpeg创建live.flv，最多15秒（给足FFmpeg连接RTSP源的时间）
+                        // 等待新FFmpeg创建live.flv，最多5秒
                         Path expectedPath = Paths.get(flvOutputPath, streamId, "live.flv").normalize();
-                        for (int wait = 0; wait < 150; wait++) {
+                        for (int wait = 0; wait < 50; wait++) {
                             File expectedFile = expectedPath.toFile();
                             if (expectedFile.exists() && expectedFile.length() > 0) {
                                 try {
@@ -171,7 +158,7 @@ public class FlvStreamController {
                         }
 
                         if (raf == null) {
-                            log.warn("[FLV-{}] 恢复后新FLV文件仍未创建（等待15秒超时），结束传输", streamId);
+                            log.warn("[FLV-{}] 恢复后新FLV文件仍未创建（等待5秒超时），结束传输", streamId);
                             return;
                         }
                         continue;
