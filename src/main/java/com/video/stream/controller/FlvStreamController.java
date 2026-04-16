@@ -140,7 +140,6 @@ public class FlvStreamController {
                     // 如果主动检测到进程已死亡，立即触发恢复
                     if (processDied) {
                         processDied = false;
-                        lastRecoveryCheck = System.currentTimeMillis();
                         streamService.tryRecoverStream(streamId);
 
                         // 关闭旧文件（已被tryRecoverStream重命名）
