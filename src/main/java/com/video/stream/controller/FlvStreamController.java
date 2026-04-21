@@ -81,6 +81,7 @@ public class FlvStreamController {
         // 不手动设置 Transfer-Encoding: chunked，Tomcat 会自动添加
 
         streamService.recordStreamAccess(streamId);
+        streamService.registerViewer(streamId);
 
         // 同步流式传输，所有异常本地消化
         RandomAccessFile raf = null;
@@ -227,8 +228,7 @@ public class FlvStreamController {
         } catch (IOException e) {
             String msg = e.getMessage();
             if (isClientDisconnect(msg)) {
-                log.info("[FLV-{}] 客户端断开连接，停止拉流", streamId);
-                streamService.stopStream(streamId);
+                log.info("[FLV-{}] 客户端断开连接，保留FFmpeg流等待自动空闲回收", streamId);
             } else {
                 log.debug("[FLV-{}] 流结束: {}", streamId, msg != null ? msg : e.getClass().getSimpleName());
             }
@@ -241,6 +241,7 @@ public class FlvStreamController {
             if (raf != null) {
                 try { raf.close(); } catch (IOException ignored) {}
             }
+            streamService.unregisterViewer(streamId);
         }
     }
 

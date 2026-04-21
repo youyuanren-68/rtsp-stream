@@ -26,6 +26,7 @@ rtsp:
     access-path: /rtspStream/hls
     segment-time: 2
     list-size: 10
+    delete-threshold: 5
     cleanup-enabled: true
     cleanup-interval: 120000
   flv:
@@ -35,11 +36,14 @@ rtsp:
     cleanup-interval: 120000
     max-file-size-mb: 500
     max-file-age-hours: 24
+    history-retention-ms: 300000
+    history-file-limit: 3
   stream:
     auto-stop-enabled: true
     auto-stop-timeout: 1800000
     max-concurrent-streams: 50
     max-reconnect-attempts: 10
+    stale-output-timeout: 45000
   ffmpeg:
     path: D:/AI/ffmpeg-8.1/bin/ffmpeg.exe
     preset: ultrafast

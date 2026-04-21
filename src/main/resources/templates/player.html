@@ -70,6 +70,7 @@
         let currentStreamId = null;
         let hls = null;
         let hlsReadyCheckInterval = null;
+        let hlsRestartTimer = null;
         
         function startStream() {
             const rtspUrl = document.getElementById('rtspUrl').value.trim();
@@ -108,6 +109,7 @@
             });
         }
         
+        /* Legacy waitForHlsReady disabled due malformed encoded strings.
         function waitForHlsReady(streamId, timeout) {
             let elapsed = 0;
             const checkInterval = 1000;
@@ -125,7 +127,7 @@
                         hlsReadyCheckInterval = null;
                         const m3u8Url = data.data.m3u8Url;
                         showStatus('HLS文件已就绪，正在播放...', 'success');
-                        playHls(m3u8Url);
+                        playHlsStable(m3u8Url);
                     } else {
                         elapsed += checkInterval;
                         if (elapsed >= timeout) {
@@ -141,6 +143,73 @@
             }, checkInterval);
         }
         
+        */
+
+        /* Replacement below disabled after source encoding mangled string literals.
+        function waitForHlsReady(streamId, timeout) {
+            let elapsed = 0;
+            const checkInterval = 1000;
+
+            if (hlsReadyCheckInterval) {
+                clearInterval(hlsReadyCheckInterval);
+            }
+
+            hlsReadyCheckInterval = setInterval(function() {
+                fetch('/rtspStream/hlsReady?streamId=' + encodeURIComponent(streamId))
+                    .then(function(response) { return response.json(); })
+                    .then(function(data) {
+                        if (data.code === 0 && data.data.ready) {
+                            clearInterval(hlsReadyCheckInterval);
+                            hlsReadyCheckInterval = null;
+                            showStatus('HLS文件已就绪，正在播放...', 'success');
+                            playHlsStable(data.data.m3u8Url);
+                        } else {
+                            elapsed += checkInterval;
+                            if (elapsed >= timeout) {
+                                clearInterval(hlsReadyCheckInterval);
+                                hlsReadyCheckInterval = null;
+                                showStatus('HLS文件生成超时，请检查RTSP源', 'error');
+                            }
+                        }
+                    })
+                    .catch(function(err) {
+                        console.error('check HLS status failed', err);
+                    });
+            }, checkInterval);
+        }
+
+        */
+
+        function waitForHlsReady(streamId, timeout) {
+            let elapsed = 0;
+            const checkInterval = 1000;
+            if (hlsReadyCheckInterval) {
+                clearInterval(hlsReadyCheckInterval);
+            }
+            hlsReadyCheckInterval = setInterval(function() {
+                fetch('/rtspStream/hlsReady?streamId=' + encodeURIComponent(streamId))
+                    .then(function(response) { return response.json(); })
+                    .then(function(data) {
+                        if (data.code === 0 && data.data.ready) {
+                            clearInterval(hlsReadyCheckInterval);
+                            hlsReadyCheckInterval = null;
+                            showStatus('HLS ready, playing...', 'success');
+                            playHlsStable(data.data.m3u8Url);
+                            return;
+                        }
+                        elapsed += checkInterval;
+                        if (elapsed >= timeout) {
+                            clearInterval(hlsReadyCheckInterval);
+                            hlsReadyCheckInterval = null;
+                            showStatus('HLS file generation timeout, check RTSP source', 'error');
+                        }
+                    })
+                    .catch(function(err) {
+                        console.error('check HLS status failed', err);
+                    });
+            }, checkInterval);
+        }
+
         function stopStream() {
             if (!currentStreamId) {
                 showStatus('没有正在播放的流', 'error');
@@ -168,6 +237,7 @@
             });
         }
         
+        /* Legacy loadStreams disabled due malformed encoded template strings.
         function loadStreams() {
             fetch('/rtspStream/streams')
             .then(response => response.json())
@@ -195,6 +265,34 @@
             });
         }
         
+        */
+
+        function loadStreams() {
+            fetch('/rtspStream/streams')
+                .then(function(response) { return response.json(); })
+                .then(function(data) {
+                    const streamList = document.getElementById('streamList');
+                    const streams = data.data || {};
+                    const ids = Object.keys(streams);
+                    if (ids.length === 0) {
+                        streamList.innerHTML = '<p style="color:#999;">No active streams</p>';
+                        return;
+                    }
+                    streamList.innerHTML = ids.map(function(id) {
+                        const status = streams[id] || 'unknown';
+                        const running = status.indexOf('running') === 0;
+                        return '<div class="stream-item">'
+                            + '<div class="info"><strong>' + id + '</strong><br>'
+                            + '<small style="color:#999;">' + status + '</small></div>'
+                            + '<span class="status ' + (running ? 'running' : 'stopped') + '">'
+                            + (running ? 'running' : 'stopped') + '</span>'
+                            + "<div class=\"actions\"><button onclick=\"stopStreamById('" + id + "')\">stop</button></div>"
+                            + '</div>';
+                    }).join('');
+                });
+        }
+
+        /* Legacy stopStreamById disabled due malformed encoded strings.
         function stopStreamById(streamId) {
             fetch('/rtspStream/stop?streamId=' + streamId, { method: 'POST' })
             .then(response => response.json())
@@ -211,6 +309,25 @@
             });
         }
         
+        */
+
+        function stopStreamById(streamId) {
+            fetch('/rtspStream/stop?streamId=' + encodeURIComponent(streamId), { method: 'POST' })
+                .then(function(response) { return response.json(); })
+                .then(function(data) {
+                    if (data.code === 0) {
+                        showStatus('Stream ' + streamId + ' stopped', 'success');
+                        if (currentStreamId === streamId && hls) {
+                            hls.destroy();
+                            hls = null;
+                            currentStreamId = null;
+                        }
+                        loadStreams();
+                    }
+                });
+        }
+
+        /* Legacy HLS player disabled. Kept in file for comparison but not parsed.
         function playHls(m3u8Url) {
             const video = document.getElementById('videoPlayer');
             
@@ -355,6 +472,166 @@
             }
         }
         
+        */
+
+        function playHlsStable(m3u8Url) {
+            const video = document.getElementById('videoPlayer');
+            const sourceUrl = m3u8Url + (m3u8Url.indexOf('?') >= 0 ? '&' : '?') + '_t=' + Date.now();
+
+            if (hlsRestartTimer) {
+                clearTimeout(hlsRestartTimer);
+                hlsRestartTimer = null;
+            }
+
+            if (hls) {
+                hls.destroy();
+                hls = null;
+            }
+
+            if (Hls.isSupported()) {
+                let mediaErrorCount = 0;
+                let networkErrorCount = 0;
+                let lastGoodFragmentAt = Date.now();
+
+                function jumpToLiveEdge() {
+                    try {
+                        if (video.seekable && video.seekable.length > 0) {
+                            const end = video.seekable.end(video.seekable.length - 1);
+                            if (isFinite(end) && end > 3) {
+                                video.currentTime = Math.max(0, end - 2);
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('[HLS] jump live edge failed', e);
+                    }
+                }
+
+                function schedulePlayerRestart(reason, delay) {
+                    if (hlsRestartTimer) return;
+                    showStatus('HLS播放异常，正在重建播放器: ' + reason, 'error');
+                    hlsRestartTimer = setTimeout(function() {
+                        hlsRestartTimer = null;
+                        playHlsStable(m3u8Url);
+                    }, delay || 1000);
+                }
+
+                hls = new Hls({
+                    liveSyncDurationCount: 4,
+                    liveMaxLatencyDurationCount: 10,
+                    enableWorker: true,
+                    lowLatencyMode: false,
+                    maxBufferLength: 30,
+                    maxMaxBufferLength: 60,
+                    backBufferLength: 30,
+                    startLevel: -1,
+                    testBandwidth: true,
+                    progressive: true,
+                    nudgeOffset: 0.1,
+                    nudgeMaxRetry: 5,
+                    maxStarvationDelay: 6,
+                    maxFragLookUpTolerance: 0.5,
+                    manifestLoadingMaxRetry: 8,
+                    levelLoadingMaxRetry: 8,
+                    fragLoadingMaxRetry: 8,
+                    manifestLoadingRetryDelay: 500,
+                    levelLoadingRetryDelay: 500,
+                    fragLoadingRetryDelay: 500,
+                    xhrSetup: function(xhr) {
+                        xhr.setRequestHeader('Cache-Control', 'no-cache');
+                    }
+                });
+
+                hls.loadSource(sourceUrl);
+                hls.attachMedia(video);
+                hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                    video.play().catch(function(e) { console.log('autoplay blocked', e); });
+                });
+                hls.on(Hls.Events.LEVEL_LOADED, function(event, data) {
+                    if (data && data.details && data.details.live) {
+                        jumpToLiveEdge();
+                    }
+                });
+                hls.on(Hls.Events.FRAG_BUFFERED, function() {
+                    lastGoodFragmentAt = Date.now();
+                    mediaErrorCount = 0;
+                    networkErrorCount = 0;
+                    if (video.paused) {
+                        video.play().catch(function(e) { console.log('play blocked', e); });
+                    }
+                });
+                hls.on(Hls.Events.BUFFER_STALLED, function() {
+                    hls.stopLoad();
+                    setTimeout(function() {
+                        hls.startLoad(-1);
+                        jumpToLiveEdge();
+                        video.play().catch(function() {});
+                    }, 800);
+                });
+
+                video.onwaiting = function() {
+                    if (Date.now() - lastGoodFragmentAt > 10000) {
+                        schedulePlayerRestart('buffer waiting timeout', 1000);
+                    }
+                };
+
+                const maxMediaErrorRecover = 2;
+                const maxNetworkErrorRecover = 3;
+
+                hls.on(Hls.Events.ERROR, function(event, data) {
+                    console.error('HLS error:', data.type, data.details, data.fatal);
+
+                    if (data.fatal) {
+                        switch (data.type) {
+                            case Hls.ErrorTypes.NETWORK_ERROR:
+                                networkErrorCount++;
+                                showStatus('HLS网络错误，尝试恢复(' + networkErrorCount + '/' + maxNetworkErrorRecover + ')...', 'error');
+                                if (networkErrorCount <= maxNetworkErrorRecover) {
+                                    hls.stopLoad();
+                                    setTimeout(function() {
+                                        hls.startLoad(-1);
+                                        jumpToLiveEdge();
+                                    }, 800);
+                                } else {
+                                    schedulePlayerRestart('network error', 1000);
+                                }
+                                break;
+                            case Hls.ErrorTypes.MEDIA_ERROR:
+                                mediaErrorCount++;
+                                showStatus('HLS媒体错误，尝试恢复(' + mediaErrorCount + '/' + maxMediaErrorRecover + ')...', 'error');
+                                if (mediaErrorCount <= maxMediaErrorRecover) {
+                                    setTimeout(function() {
+                                        hls.recoverMediaError();
+                                        jumpToLiveEdge();
+                                    }, 500);
+                                } else {
+                                    schedulePlayerRestart('media error', 1000);
+                                }
+                                break;
+                            default:
+                                schedulePlayerRestart('fatal ' + data.type, 1000);
+                                break;
+                        }
+                    } else if (data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR ||
+                            data.details === Hls.ErrorDetails.LEVEL_LOAD_ERROR ||
+                            data.details === Hls.ErrorDetails.FRAG_PARSING_ERROR ||
+                            data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
+                        hls.stopLoad();
+                        setTimeout(function() {
+                            hls.startLoad(-1);
+                            jumpToLiveEdge();
+                        }, 800);
+                    }
+                });
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                video.src = sourceUrl;
+                video.addEventListener('loadedmetadata', function() {
+                    video.play();
+                });
+            } else {
+                showStatus('浏览器不支持HLS播放', 'error');
+            }
+        }
+
         function showStatus(message, type) {
             const statusBar = document.getElementById('statusBar');
             statusBar.textContent = message;

@@ -47,6 +47,9 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
     
     @Value("${rtsp.hls.list-size:3}")
     private int listSize;
+
+    @Value("${rtsp.hls.delete-threshold:5}")
+    private int hlsDeleteThreshold;
     
     @Value("${rtsp.ffmpeg.preset:ultrafast}")
     private String preset;
@@ -146,6 +149,22 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
      * 启动时清理可能残留的旧 FLV 历史文件（live_TIMESTAMP.flv）
      */
     private void cleanupLingeringFfmpegProcesses() {
+        String osName = System.getProperty("os.name", "").toLowerCase();
+        if (osName.contains("win")) {
+            try {
+                String command = "Get-CimInstance Win32_Process -Filter \"name='ffmpeg.exe'\" "
+                        + "| Where-Object { $_.CommandLine -and $_.CommandLine.Contains('comment=rtsp-stream:') } "
+                        + "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; $_.ProcessId }";
+                Process process = new ProcessBuilder("powershell", "-NoProfile", "-Command", command)
+                        .redirectErrorStream(true)
+                        .start();
+                int exitCode = process.waitFor();
+                log.info("[FFmpeg启动清理] 已扫描并清理残留rtsp-stream FFmpeg进程, exitCode={}", exitCode);
+            } catch (Exception e) {
+                log.warn("[FFmpeg启动清理] 清理残留FFmpeg进程失败: {}", e.getMessage());
+            }
+        }
+
         File flvDir = new File(flvOutputPath);
         if (!flvDir.exists() || !flvDir.isDirectory()) return;
         File[] streamDirs = flvDir.listFiles(File::isDirectory);
@@ -255,12 +274,15 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             "-c:v", videoCodec,
             "-preset", preset,
             "-tune", tune,
+            "-force_key_frames", "expr:gte(t,n_forced*" + segmentTime + ")",
+            "-sc_threshold", "0",
             "-c:a", audioCodec,
             "-ar", String.valueOf(audioSampleRate),
             "-f", "hls",
             "-hls_time", String.valueOf(segmentTime),
             "-hls_list_size", String.valueOf(listSize),
-            "-hls_flags", "delete_segments",
+            "-hls_delete_threshold", String.valueOf(Math.max(hlsDeleteThreshold, 1)),
+            "-hls_flags", "delete_segments+independent_segments",
             "-hls_segment_filename", streamDir + "/seg_%05d.ts",
             "-metadata", "comment=rtsp-stream:" + streamId,
             "-y",
@@ -449,6 +471,11 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             killProcessTree(process, streamId);
         }
 
+        cleanupStreamThreads(streamId);
+        cleanupStreamState(streamId);
+        cleanupStreamMetadata(streamId);
+        cleanupStreamFiles(streamId);
+
         // 清理所有监控线程
         cleanupStreamThreads(streamId);
 
@@ -510,10 +537,20 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         reconnectAttempts.remove(streamId);
         lastReconnectTime.remove(streamId);
         lastReconnectFailTime.remove(streamId);
+        flvLastObservedSize.remove(streamId);
+        streamLastOutputTime.remove(streamId);
         // 保留 streamType、streamRtspUrls 和 streamLastAccessTime
         // - streamType/streamRtspUrls: 恢复时识别流类型和RTSP地址
         // - streamLastAccessTime: 健康检查判断是否有最近观众
         // 下次 startStream/startFlvStream 会自动覆盖这些值
+    }
+
+    private void cleanupStreamMetadata(String streamId) {
+        streamType.remove(streamId);
+        streamRtspUrls.remove(streamId);
+        streamLastAccessTime.remove(streamId);
+        streamViewerCounts.remove(streamId);
+        streamRecoveryLocks.remove(streamId);
     }
 
     /**
@@ -751,6 +788,10 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             for (Map.Entry<String, Long> entry : streamLastAccessTime.entrySet()) {
                 String streamId = entry.getKey();
                 Long lastAccess = entry.getValue();
+
+                if (getViewerCount(streamId) > 0) {
+                    continue;
+                }
                 
                 if (now - lastAccess > autoStopTimeout) {
                     Process process = activeProcesses.get(streamId);
@@ -820,6 +861,12 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             for (String streamId : streamIds) {
                 Process process = activeProcesses.get(streamId);
                 String type = streamType.get(streamId);
+
+                if ("flv".equals(type) && process != null && process.isAlive() && hasRecentViewer(streamId) && isFlvOutputStale(streamId)) {
+                    log.warn("[健康检查-FLV] 流{} FFmpeg仍存活但输出长时间无增长，重启拉流", streamId);
+                    restartFlvStream(streamId);
+                    continue;
+                }
 
                 if ("flv".equals(type) && (process == null || !process.isAlive())) {
                     if (!hasRecentViewer(streamId)) {
@@ -913,6 +960,30 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         }
     }
     
+    private boolean isFlvOutputStale(String streamId) {
+        File flvFile = new File(flvOutputPath, streamId + "/live.flv");
+        long now = System.currentTimeMillis();
+        if (!flvFile.exists() || flvFile.length() <= 0) {
+            Long lastOutput = streamLastOutputTime.get(streamId);
+            return lastOutput != null && now - lastOutput > staleOutputTimeout;
+        }
+
+        long size = flvFile.length();
+        Long lastSize = flvLastObservedSize.get(streamId);
+        if (lastSize == null || size > lastSize) {
+            flvLastObservedSize.put(streamId, size);
+            streamLastOutputTime.put(streamId, now);
+            return false;
+        }
+
+        Long lastOutput = streamLastOutputTime.get(streamId);
+        if (lastOutput == null) {
+            streamLastOutputTime.put(streamId, Math.max(flvFile.lastModified(), now));
+            return false;
+        }
+        return now - lastOutput > staleOutputTimeout;
+    }
+
     private void cleanupOldFlvSegments(File streamDir) {
         File[] files = streamDir.listFiles();
         if (files == null || files.length == 0) {
@@ -920,10 +991,10 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         }
 
         long now = System.currentTimeMillis();
-        long maxAgeMs = 24 * 60 * 60 * 1000L;
+        long maxAgeMs = Math.max(flvHistoryRetentionMs, 30000L);
 
         for (File file : files) {
-            if (file.isFile() && file.getName().endsWith(".flv")) {
+            if (file.isFile() && file.getName().endsWith(".flv") && !file.getName().equals("live.flv")) {
                 long fileAge = now - file.lastModified();
                 if (fileAge > maxAgeMs) {
                     long fileSize = file.length();
@@ -955,7 +1026,10 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         int cleaned = 0;
         long totalSize = 0;
         for (File file : files) {
-            if (file.isFile() && file.getName().endsWith(".flv") && !file.getName().equals("live.flv")) {
+            if (file.isFile()
+                    && file.getName().endsWith(".flv")
+                    && !file.getName().equals("live.flv")
+                    && System.currentTimeMillis() - file.lastModified() > Math.max(flvHistoryRetentionMs, 30000L)) {
                 long fileSize = file.length();
                 if (file.delete()) {
                     cleaned++;
@@ -1127,6 +1201,9 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
      * 判断该流是否有活跃观众（最近 autoStopTimeout 时间内有请求）
      */
     private boolean hasRecentViewer(String streamId) {
+        if (getViewerCount(streamId) > 0) {
+            return true;
+        }
         Long lastAccess = streamLastAccessTime.get(streamId);
         if (lastAccess == null) return false;
         return (System.currentTimeMillis() - lastAccess) < autoStopTimeout;
@@ -1359,6 +1436,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         cleanupStreamState(streamId);
 
         // 保留必要信息用于重启
+        cleanupStreamThreads(streamId);
         streamRtspUrls.put(streamId, rtspUrl);
         streamType.put(streamId, "flv");
 
