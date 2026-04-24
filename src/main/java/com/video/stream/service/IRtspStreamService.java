@@ -16,6 +16,8 @@ public interface IRtspStreamService {
     Map<String, String> getActiveStreams();
     
     boolean isStreamActive(String streamId);
+
+    boolean isStreamManaged(String streamId);
     
     boolean isHlsFileReady(String streamId);
     

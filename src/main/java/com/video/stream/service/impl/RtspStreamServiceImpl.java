@@ -186,6 +186,49 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         }
     }
     
+    private void markStreamStarted(String streamId, Process process, String type, String rtspUrl) {
+        long now = System.currentTimeMillis();
+        activeProcesses.put(streamId, process);
+        streamStatus.put(streamId, "running");
+        streamStartTime.put(streamId, now);
+        streamType.put(streamId, type);
+        streamRtspUrls.put(streamId, rtspUrl);
+        streamLastAccessTime.put(streamId, now);
+        streamViewerCounts.computeIfAbsent(streamId, key -> new AtomicInteger());
+        streamLastOutputTime.put(streamId, now);
+
+        if ("flv".equals(type)) {
+            flvFileReady.put(streamId, false);
+            hlsFileReady.remove(streamId);
+            flvLastObservedSize.put(streamId, 0L);
+        } else {
+            hlsFileReady.put(streamId, false);
+            flvFileReady.remove(streamId);
+            flvLastObservedSize.remove(streamId);
+        }
+    }
+
+    private void cleanupRuntimeState(String streamId) {
+        cleanupStreamThreads(streamId);
+        cleanupStreamState(streamId);
+    }
+
+    private String sanitizeRtspUrl(String rtspUrl) {
+        if (rtspUrl == null) {
+            return null;
+        }
+        int schemeIndex = rtspUrl.indexOf("://");
+        if (schemeIndex < 0) {
+            return rtspUrl;
+        }
+        int authorityStart = schemeIndex + 3;
+        int atIndex = rtspUrl.indexOf('@', authorityStart);
+        if (atIndex < 0) {
+            return rtspUrl;
+        }
+        return rtspUrl.substring(0, authorityStart) + "***:***" + rtspUrl.substring(atIndex);
+    }
+
     @Override
     public boolean startStream(String rtspUrl, String streamId) throws IOException {
         if (rtspUrl == null || rtspUrl.isEmpty()) {
@@ -293,22 +336,13 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         
         try {
             Process process = processBuilder.start();
-            activeProcesses.put(streamId, process);
-            streamStatus.put(streamId, "running");
-            streamStartTime.put(streamId, System.currentTimeMillis());
-            streamType.put(streamId, "hls");
-            hlsFileReady.put(streamId, false);
-            streamRtspUrls.put(streamId, rtspUrl);
-            streamLastAccessTime.put(streamId, System.currentTimeMillis());
-            streamViewerCounts.computeIfAbsent(streamId, key -> new AtomicInteger());
-            streamLastOutputTime.put(streamId, System.currentTimeMillis());
-            flvLastObservedSize.remove(streamId);
+            markStreamStarted(streamId, process, "hls", rtspUrl);
             
             startLogReader(streamId, process);
             startProcessMonitor(streamId, process);
             startHlsFileMonitor(streamId, m3u8Path);
             
-            log.info("[HLS-{}] RTSP转HLS流已启动: rtspUrl={}, output={}", streamId, rtspUrl, m3u8Path);
+            log.info("[HLS-{}] RTSP转HLS流已启动: rtspUrl={}, output={}", streamId, sanitizeRtspUrl(rtspUrl), m3u8Path);
             return true;
             
         } catch (IOException e) {
@@ -404,7 +438,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         
         String flvOutput = streamDir + "/live.flv";
         
-        log.info("[FLV-{}] 准备启动FLV转码: rtspUrl={}, output={}", streamId, rtspUrl, flvOutput);
+        log.info("[FLV-{}] 准备启动FLV转码: rtspUrl={}, output={}", streamId, sanitizeRtspUrl(rtspUrl), flvOutput);
 
         ProcessBuilder processBuilder = new ProcessBuilder(
             ffmpegPath,
@@ -429,22 +463,13 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
         
         try {
             Process process = processBuilder.start();
-            activeProcesses.put(streamId, process);
-            streamStatus.put(streamId, "running");
-            streamStartTime.put(streamId, System.currentTimeMillis());
-            streamType.put(streamId, "flv");
-            flvFileReady.put(streamId, false);
-            streamRtspUrls.put(streamId, rtspUrl);
-            streamLastAccessTime.put(streamId, System.currentTimeMillis());
-            streamViewerCounts.computeIfAbsent(streamId, key -> new AtomicInteger());
-            streamLastOutputTime.put(streamId, System.currentTimeMillis());
-            flvLastObservedSize.put(streamId, 0L);
+            markStreamStarted(streamId, process, "flv", rtspUrl);
             
             startLogReader(streamId, process);
             startProcessMonitor(streamId, process);
             startFlvFileMonitor(streamId, flvOutput);
             
-            log.info("[FLV-{}] RTSP转FLV流已启动: rtspUrl={}, output={}", streamId, rtspUrl, flvOutput);
+            log.info("[FLV-{}] RTSP转FLV流已启动: rtspUrl={}, output={}", streamId, sanitizeRtspUrl(rtspUrl), flvOutput);
             return true;
             
         } catch (IOException e) {
@@ -471,8 +496,7 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
             killProcessTree(process, streamId);
         }
 
-        cleanupStreamThreads(streamId);
-        cleanupStreamState(streamId);
+        cleanupRuntimeState(streamId);
         cleanupStreamMetadata(streamId);
         cleanupStreamFiles(streamId);
 
@@ -513,6 +537,11 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
     public boolean isStreamActive(String streamId) {
         Process process = activeProcesses.get(streamId);
         return process != null && process.isAlive();
+    }
+
+    @Override
+    public boolean isStreamManaged(String streamId) {
+        return streamRtspUrls.containsKey(streamId) && streamType.containsKey(streamId);
     }
     
     public long getStreamRunningTime(String streamId) {
@@ -1170,11 +1199,17 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
     }
     
     public void recordStreamAccess(String streamId) {
+        if (!isStreamManaged(streamId)) {
+            return;
+        }
         streamLastAccessTime.put(streamId, System.currentTimeMillis());
     }
 
     @Override
     public void registerViewer(String streamId) {
+        if (!isStreamManaged(streamId)) {
+            return;
+        }
         AtomicInteger count = streamViewerCounts.computeIfAbsent(streamId, key -> new AtomicInteger());
         count.incrementAndGet();
         streamLastAccessTime.put(streamId, System.currentTimeMillis());
@@ -1182,6 +1217,9 @@ public class RtspStreamServiceImpl implements IRtspStreamService {
 
     @Override
     public void unregisterViewer(String streamId) {
+        if (!isStreamManaged(streamId) && !streamViewerCounts.containsKey(streamId)) {
+            return;
+        }
         AtomicInteger count = streamViewerCounts.get(streamId);
         if (count != null) {
             int remaining = count.decrementAndGet();

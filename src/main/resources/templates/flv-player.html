@@ -16,7 +16,7 @@
             background-color: white;
             padding: 20px;
             border-radius: 8px;
-            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
         }
         h1 {
             color: #333;
@@ -32,6 +32,7 @@
             height: auto;
             border: 1px solid #ddd;
             border-radius: 4px;
+            background: #000;
         }
         .controls {
             margin: 20px 0;
@@ -77,285 +78,67 @@
 <body>
     <div class="container">
         <h1>FLV 实时播放器</h1>
-        
+
         <div class="controls">
-            <input type="text" id="rtspUrl" placeholder="RTSP地址 (rtsp://...)" value="rtsp://rtspstream:qrDIMnuNzPL2cwHIg0HRA@zephyr.rtsp.stream/movie">
-            <input type="text" id="streamId" placeholder="流标识 (可选)" value="camera02">
+            <input type="text" id="rtspUrl" placeholder="RTSP 地址 (rtsp://...)" value="rtsp://rtspstream:qrDIMnuNzPL2cwHIg0HRA@zephyr.rtsp.stream/movie">
+            <input type="text" id="streamId" placeholder="流标识" value="camera02">
             <button onclick="startStream()">启动流</button>
             <button class="stop" onclick="stopStream()">停止流</button>
         </div>
-        
+
         <div class="player-container">
             <video id="videoElement" controls autoplay width="1000" height="560"></video>
         </div>
-        
-        <div class="status" id="status">
-            状态: 就绪
-        </div>
+
+        <div class="status" id="status">状态：就绪</div>
     </div>
-    
+
     <script src="../flv.min.js"></script>
     <script>
         let player = null;
         let currentStreamId = null;
         let flvReadyCheckInterval = null;
-        
-        function startStream() {
-            const rtspUrl = document.getElementById('rtspUrl').value;
-            const streamId = document.getElementById('streamId').value || 'flv_' + Date.now();
-            
-            if (!rtspUrl) {
-                updateStatus('请输入RTSP地址', 'error');
-                return;
-            }
-            
-            if (!rtspUrl.startsWith('rtsp://')) {
-                updateStatus('RTSP地址格式不正确，必须以rtsp://开头', 'error');
-                return;
-            }
-            
-            updateStatus('正在启动FLV流，等待文件生成...');
-            
-            fetch('/rtspStream/startFlv', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
-                body: 'rtspUrl=' + encodeURIComponent(rtspUrl) + '&streamId=' + encodeURIComponent(streamId)
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.code === 0) {
-                    currentStreamId = data.data.streamId;
-                    updateStatus('FLV流已启动，等待文件就绪...');
-                    waitForFlvReady(currentStreamId, 30000);
-                } else {
-                    updateStatus('启动失败: ' + data.msg, 'error');
-                }
-            })
-            .catch(error => {
-                updateStatus('请求失败: ' + error.message, 'error');
-            });
+        let flvReconnectTimer = null;
+        let flvPlaybackToken = 0;
+        let flvReconnectAttempts = 0;
+        const maxFlvReconnectAttempts = 3;
+        const flvBackendRetryDelayMs = 3000;
+
+        function updateStatus(message, type = 'normal') {
+            const statusElement = document.getElementById('status');
+            statusElement.textContent = '状态：' + message;
+            statusElement.className = type === 'error' ? 'status error' : 'status';
         }
-        
-        function waitForFlvReady(streamId, timeout) {
-            let elapsed = 0;
-            const checkInterval = 1000;
-            
-            if (flvReadyCheckInterval) {
-                clearInterval(flvReadyCheckInterval);
+
+        function replaceVideoElement() {
+            const videoElement = document.getElementById('videoElement');
+            if (!videoElement) {
+                return null;
             }
-            
-            flvReadyCheckInterval = setInterval(() => {
-                fetch('/rtspStream/flvReady?streamId=' + streamId)
-                .then(response => response.json())
-                .then(data => {
-                    if (data.code === 0 && data.data.ready) {
-                        clearInterval(flvReadyCheckInterval);
-                        flvReadyCheckInterval = null;
-                        const flvUrl = data.data.flvUrl;
-                        updateStatus('FLV文件已就绪，正在播放...');
-                        initPlayer(flvUrl);
-                    } else {
-                        elapsed += checkInterval;
-                        if (elapsed >= timeout) {
-                            clearInterval(flvReadyCheckInterval);
-                            flvReadyCheckInterval = null;
-                            updateStatus('FLV文件生成超时，请检查RTSP源', 'error');
-                        }
-                    }
-                })
-                .catch(error => {
-                    console.error('检查FLV状态失败:', error);
-                });
-            }, checkInterval);
+            try {
+                videoElement.pause();
+            } catch (e) {
+                console.warn('pause video failed', e);
+            }
+            videoElement.removeAttribute('src');
+            videoElement.src = '';
+            videoElement.load();
+            const freshVideoElement = videoElement.cloneNode(false);
+            videoElement.parentNode.replaceChild(freshVideoElement, videoElement);
+            return freshVideoElement;
         }
-        
-        function stopStream() {
-            if (!currentStreamId) {
-                updateStatus('没有正在运行的流', 'error');
-                return;
-            }
-            
+
+        function destroyFlvPlayer(clearStreamId) {
+            flvPlaybackToken++;
+
             if (flvReadyCheckInterval) {
                 clearInterval(flvReadyCheckInterval);
                 flvReadyCheckInterval = null;
             }
-            
-            updateStatus('正在停止流...');
-            
-            fetch('/rtspStream/stop?streamId=' + encodeURIComponent(currentStreamId), {
-                method: 'POST'
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.code === 0) {
-                    if (player) {
-                        player.destroy();
-                        player = null;
-                    }
-                    updateStatus('流已停止');
-                    currentStreamId = null;
-                } else {
-                    updateStatus('停止失败: ' + data.msg, 'error');
-                }
-            })
-            .catch(error => {
-                updateStatus('请求失败: ' + error.message, 'error');
-            });
-        }
-        
-        function initPlayer(flvUrl) {
-            if (flvjs.isSupported()) {
-                const videoElement = document.getElementById('videoElement');
-
-                if (player) {
-                    player.destroy();
-                    player = null;
-                }
-
-                player = flvjs.createPlayer({
-                    type: 'flv',
-                    isLive: true,
-                    url: 'http://' + window.location.host + flvUrl,
-                    enableWorker: true,
-                    enableStashBuffer: false,
-                    stashInitialSize: 128,
-                    autoCleanupSourceBuffer: true,
-                    autoCleanupMaxBackwardDuration: 30,
-                    autoCleanupMinBackwardDuration: 15,
-                    liveBufferLatencyAction: 'jump',
-                    liveSyncDurationCount: 3,
-                    lazyLoad: false,
-                    lazyLoadMaxDuration: 60,
-                    fixAudioTimestampGap: true,
-                    accurateSeek: false
-                });
-
-                player.attachMediaElement(videoElement);
-                player.load();
-                player.play().catch(error => {
-                    console.error('播放失败:', error);
-                    updateStatus('播放失败，尝试重连...', 'error');
-                    setTimeout(() => reconnectPlayer(flvUrl), 3000);
-                });
-
-                updateStatus('正在播放 FLV 流');
-
-                let reconnectAttempts = 0;
-                const maxReconnectAttempts = 10;
-
-                // 监听视频元素卡顿事件
-                let stallTimer = null;
-                videoElement.addEventListener('stalled', function() {
-                    console.warn('[FLV] 视频元素卡住，启动恢复计时器');
-                    if (stallTimer) clearTimeout(stallTimer);
-                    stallTimer = setTimeout(function() {
-                        console.warn('[FLV] 卡住超过5秒，尝试恢复');
-                        reconnectAttempts++;
-                        if (reconnectAttempts < maxReconnectAttempts) {
-                            reconnectPlayer(flvUrl);
-                        } else {
-                            updateStatus('重连次数过多，请检查流状态', 'error');
-                        }
-                    }, 5000);
-                });
-
-                videoElement.addEventListener('playing', function() {
-                    if (stallTimer) {
-                        clearTimeout(stallTimer);
-                        stallTimer = null;
-                    }
-                    reconnectAttempts = 0;
-                });
-
-                videoElement.addEventListener('waiting', function() {
-                    console.warn('[FLV] 视频等待缓冲');
-                    if (stallTimer) clearTimeout(stallTimer);
-                    stallTimer = setTimeout(function() {
-                        console.warn('[FLV] 等待缓冲超过5秒，尝试恢复');
-                        reconnectAttempts++;
-                        if (reconnectAttempts < maxReconnectAttempts) {
-                            reconnectPlayer(flvUrl);
-                        }
-                    }, 5000);
-                });
-
-                player.on(flvjs.Events.ERROR, (errorType, errorDetail, errorInfo) => {
-                    console.error('播放器错误:', errorType, errorDetail, errorInfo);
-
-                    if (errorType === flvjs.ErrorTypes.MEDIA_ERROR) {
-                        updateStatus('媒体错误，尝试恢复...', 'error');
-
-                        if (reconnectAttempts < maxReconnectAttempts) {
-                            reconnectAttempts++;
-                            const delay = Math.min(1000 * reconnectAttempts, 5000);
-                            updateStatus('播放出错，' + (delay/1000) + '秒后自动重连(第' + reconnectAttempts + '次)...', 'error');
-                            setTimeout(() => {
-                                if (player) {
-                                    try {
-                                        player.unload();
-                                        player.detachMediaElement();
-                                        player.attachMediaElement(videoElement);
-                                        player.load();
-                                        player.play().catch(e => console.log('播放被阻止:', e));
-                                        updateStatus('已恢复播放');
-                                        reconnectAttempts = 0;
-                                    } catch (e) {
-                                        console.error('恢复播放失败，尝试完全重连:', e);
-                                        reconnectPlayer(flvUrl);
-                                    }
-                                }
-                            }, delay);
-                        } else {
-                            updateStatus('重连次数过多，请检查流状态', 'error');
-                        }
-                    } else if (errorType === flvjs.ErrorTypes.NETWORK_ERROR) {
-                        updateStatus('网络错误，尝试重连...', 'error');
-                        reconnectAttempts++;
-                        if (reconnectAttempts < maxReconnectAttempts) {
-                            setTimeout(() => reconnectPlayer(flvUrl), 3000);
-                        } else {
-                            updateStatus('重连次数过多，请检查流状态', 'error');
-                        }
-                    } else {
-                        updateStatus('播放出错，3秒后自动重连...', 'error');
-                        reconnectAttempts++;
-                        if (reconnectAttempts < maxReconnectAttempts) {
-                            setTimeout(() => reconnectPlayer(flvUrl), 3000);
-                        } else {
-                            updateStatus('重连次数过多，请检查流状态', 'error');
-                        }
-                    }
-                });
-
-                player.on(flvjs.Events.MEDIA_INFO, (mediaInfo) => {
-                    console.log('媒体信息:', mediaInfo);
-                });
-
-                player.on(flvjs.Events.STATISTICS_INFO, (stats) => {
-                    if (stats.decodedFrames && stats.decodedFrames % 300 === 0) {
-                        console.log('统计信息:', stats);
-                    }
-                });
-
-                player.on('ended', function() {
-                    console.log('播放结束，尝试重连...');
-                    updateStatus('流结束，3秒后自动重连...', 'error');
-                    setTimeout(() => reconnectPlayer(flvUrl), 3000);
-                });
-            } else {
-                updateStatus('当前浏览器不支持 FLV 播放', 'error');
+            if (flvReconnectTimer) {
+                clearTimeout(flvReconnectTimer);
+                flvReconnectTimer = null;
             }
-        }
-        
-        function reconnectPlayer(flvUrl) {
-            if (!currentStreamId) {
-                return;
-            }
-            
-            updateStatus('正在重连...', '');
-            
             if (player) {
                 try {
                     player.pause();
@@ -363,19 +146,303 @@
                     player.detachMediaElement();
                     player.destroy();
                 } catch (e) {
-                    console.error('销毁播放器失败:', e);
+                    console.error('destroy flv player failed:', e);
                 }
                 player = null;
             }
-            
+
+            replaceVideoElement();
+            if (clearStreamId) {
+                currentStreamId = null;
+            }
+        }
+
+        function stopBackendStream(streamId) {
+            if (!streamId) {
+                return Promise.resolve();
+            }
+            return fetch('/rtspStream/stop?streamId=' + encodeURIComponent(streamId), {
+                method: 'POST'
+            }).catch(function(error) {
+                console.error('stop stream failed:', error);
+            });
+        }
+
+        function fetchStreamStatus(streamId) {
+            if (!streamId) {
+                return Promise.resolve({ active: false });
+            }
+            return fetch('/rtspStream/status?streamId=' + encodeURIComponent(streamId))
+                .then(function(response) { return response.json(); })
+                .then(function(data) {
+                    const status = data && data.data ? data.data : {};
+                    return {
+                        active: data.code === 0 && status.active === true
+                    };
+                });
+        }
+
+        function recoverFlvAfterProbe(flvUrl, reason) {
+            const streamId = currentStreamId;
+            if (!streamId) {
+                return;
+            }
+
+            updateStatus('播放异常，正在确认后台拉流状态...', 'error');
+            fetchStreamStatus(streamId)
+                .then(function(status) {
+                    if (!currentStreamId || currentStreamId !== streamId) {
+                        return;
+                    }
+
+                    if (status.active) {
+                        flvReconnectAttempts = 0;
+                        updateStatus('播放器异常，但后台拉流仍在运行，继续恢复：' + reason, 'error');
+                        destroyFlvPlayer(false);
+                        flvReconnectTimer = setTimeout(function() {
+                            flvReconnectTimer = null;
+                            if (!currentStreamId || currentStreamId !== streamId) {
+                                return;
+                            }
+                            reconnectPlayer(flvUrl);
+                        }, flvBackendRetryDelayMs);
+                        return;
+                    }
+
+                    updateStatus('播放失败，已停止后台拉流，请重新启动', 'error');
+                    destroyFlvPlayer(true);
+                    stopBackendStream(streamId);
+                })
+                .catch(function(error) {
+                    console.error('probe stream status failed:', error);
+                    if (!currentStreamId || currentStreamId !== streamId) {
+                        return;
+                    }
+                    updateStatus('播放失败，已停止后台拉流，请重新启动', 'error');
+                    destroyFlvPlayer(true);
+                    stopBackendStream(streamId);
+                });
+        }
+
+        function scheduleFlvReconnect(flvUrl, reason, delay) {
+            if (!currentStreamId) {
+                return;
+            }
+            if (flvReconnectTimer) {
+                return;
+            }
+            if (flvReconnectAttempts >= maxFlvReconnectAttempts) {
+                recoverFlvAfterProbe(flvUrl, reason || 'reconnect exhausted');
+                return;
+            }
+
+            flvReconnectAttempts++;
+            const token = flvPlaybackToken;
+            const waitMs = delay || 2000;
+            updateStatus('播放失败，' + (waitMs / 1000) + '秒后尝试重连（' + flvReconnectAttempts + '/' + maxFlvReconnectAttempts + '）：' + reason, 'error');
+
+            flvReconnectTimer = setTimeout(function() {
+                flvReconnectTimer = null;
+                if (token !== flvPlaybackToken || !currentStreamId) {
+                    return;
+                }
+                reconnectPlayer(flvUrl);
+            }, waitMs);
+        }
+
+        function startStream() {
+            const rtspUrl = document.getElementById('rtspUrl').value.trim();
+            const streamId = document.getElementById('streamId').value.trim() || 'flv_' + Date.now();
+
+            if (!rtspUrl) {
+                updateStatus('请输入 RTSP 地址', 'error');
+                return;
+            }
+            if (!rtspUrl.startsWith('rtsp://')) {
+                updateStatus('RTSP 地址必须以 rtsp:// 开头', 'error');
+                return;
+            }
+
+            flvReconnectAttempts = 0;
+            destroyFlvPlayer(false);
+            updateStatus('正在启动 FLV 流...');
+
+            fetch('/rtspStream/startFlv', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: 'rtspUrl=' + encodeURIComponent(rtspUrl) + '&streamId=' + encodeURIComponent(streamId)
+            })
+                .then(function(response) { return response.json(); })
+                .then(function(data) {
+                    if (data.code === 0) {
+                        currentStreamId = data.data.streamId;
+                        updateStatus('流已启动，正在等待 FLV 文件生成...');
+                        waitForFlvReady(currentStreamId, 30000);
+                    } else {
+                        updateStatus('启动失败：' + data.msg, 'error');
+                    }
+                })
+                .catch(function(error) {
+                    updateStatus('请求失败：' + error.message, 'error');
+                });
+        }
+
+        function waitForFlvReady(streamId, timeout) {
+            let elapsed = 0;
+            const checkInterval = 1000;
+
+            if (flvReadyCheckInterval) {
+                clearInterval(flvReadyCheckInterval);
+            }
+
+            flvReadyCheckInterval = setInterval(function() {
+                fetch('/rtspStream/flvReady?streamId=' + encodeURIComponent(streamId))
+                    .then(function(response) { return response.json(); })
+                    .then(function(data) {
+                        if (!currentStreamId || currentStreamId !== streamId) {
+                            clearInterval(flvReadyCheckInterval);
+                            flvReadyCheckInterval = null;
+                            return;
+                        }
+
+                        if (data.code === 0 && data.data.ready) {
+                            clearInterval(flvReadyCheckInterval);
+                            flvReadyCheckInterval = null;
+                            initPlayer(data.data.flvUrl);
+                            return;
+                        }
+
+                        elapsed += checkInterval;
+                        if (elapsed >= timeout) {
+                            clearInterval(flvReadyCheckInterval);
+                            flvReadyCheckInterval = null;
+                            updateStatus('FLV 文件生成超时，已停止后台拉流', 'error');
+                            destroyFlvPlayer(true);
+                            stopBackendStream(streamId);
+                        }
+                    })
+                    .catch(function(error) {
+                        console.error('check FLV ready failed:', error);
+                    });
+            }, checkInterval);
+        }
+
+        function stopStream() {
+            if (!currentStreamId) {
+                updateStatus('没有正在运行的流', 'error');
+                return;
+            }
+
+            const streamId = currentStreamId;
+            updateStatus('正在停止流...');
+            destroyFlvPlayer(true);
+            stopBackendStream(streamId).then(function() {
+                updateStatus('流已停止');
+            });
+        }
+
+        function initPlayer(flvUrl) {
+            if (!flvjs.isSupported()) {
+                updateStatus('当前浏览器不支持 FLV 播放', 'error');
+                return;
+            }
+
+            destroyFlvPlayer(false);
+            const token = flvPlaybackToken;
+            const videoElement = document.getElementById('videoElement');
+
+            player = flvjs.createPlayer({
+                type: 'flv',
+                isLive: true,
+                url: window.location.origin + flvUrl,
+                enableWorker: true,
+                enableStashBuffer: false,
+                stashInitialSize: 128,
+                autoCleanupSourceBuffer: true,
+                autoCleanupMaxBackwardDuration: 30,
+                autoCleanupMinBackwardDuration: 15,
+                liveBufferLatencyAction: 'jump',
+                lazyLoad: false,
+                fixAudioTimestampGap: true,
+                accurateSeek: false
+            });
+
+            player.attachMediaElement(videoElement);
+            player.load();
+            player.play().catch(function(error) {
+                console.error('play failed:', error);
+                scheduleFlvReconnect(flvUrl, 'play failed', 3000);
+            });
+
+            updateStatus('正在播放 FLV 流');
+
+            let stallTimer = null;
+            function scheduleStallRecovery(reason) {
+                if (token !== flvPlaybackToken || !currentStreamId) {
+                    return;
+                }
+                if (stallTimer) {
+                    clearTimeout(stallTimer);
+                }
+                stallTimer = setTimeout(function() {
+                    if (token !== flvPlaybackToken || !currentStreamId) {
+                        return;
+                    }
+                    scheduleFlvReconnect(flvUrl, reason, 1000);
+                }, 5000);
+            }
+
+            videoElement.addEventListener('stalled', function() {
+                scheduleStallRecovery('stalled');
+            });
+
+            videoElement.addEventListener('waiting', function() {
+                scheduleStallRecovery('waiting');
+            });
+
+            videoElement.addEventListener('playing', function() {
+                if (token !== flvPlaybackToken || !currentStreamId) {
+                    return;
+                }
+                if (stallTimer) {
+                    clearTimeout(stallTimer);
+                    stallTimer = null;
+                }
+                flvReconnectAttempts = 0;
+                updateStatus('正在播放 FLV 流');
+            });
+
+            player.on(flvjs.Events.ERROR, function(errorType, errorDetail, errorInfo) {
+                if (token !== flvPlaybackToken || !currentStreamId) {
+                    return;
+                }
+                console.error('FLV error:', errorType, errorDetail, errorInfo);
+                scheduleFlvReconnect(flvUrl, errorDetail || errorType, 1000);
+            });
+
+            player.on('ended', function() {
+                if (token !== flvPlaybackToken || !currentStreamId) {
+                    return;
+                }
+                scheduleFlvReconnect(flvUrl, 'stream ended', 3000);
+            });
+        }
+
+        function reconnectPlayer(flvUrl) {
+            if (!currentStreamId) {
+                return;
+            }
+            updateStatus('正在重连...');
             initPlayer(flvUrl);
         }
-        
-        function updateStatus(message, type = 'normal') {
-            const statusElement = document.getElementById('status');
-            statusElement.textContent = '状态: ' + message;
-            statusElement.className = type === 'error' ? 'status error' : 'status';
-        }
+
+        window.addEventListener('beforeunload', function() {
+            if (currentStreamId && navigator.sendBeacon) {
+                navigator.sendBeacon('/rtspStream/stop?streamId=' + encodeURIComponent(currentStreamId));
+            }
+        });
     </script>
 </body>
 </html>
